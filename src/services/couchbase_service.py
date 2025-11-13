@@ -19,11 +19,27 @@ class CouchbaseService:
             logger.error(f"Error getting data from bucket {bucket_name}: {e}", exc_info=True)
             return None
 
+    def check_index_status(self, bucket_name: str):
+        try:
+            return self.cb_dal.check_index_status(bucket_name)
+        except Exception as e:
+            logger.error(f"Error checking index status for bucket {bucket_name}: {e}", exc_info=True)
+            return None
+
     def create_primary_index(self, bucket_name: str):
         try:
-            exists, _ = self.cb_dal.check_index_status(bucket_name)
+            exists, state = self.check_index_status(bucket_name)
             if not exists:
                 self.cb_dal.create_primary_index(bucket_name)
-            
+            if not state:
+                self.cb_dal.build_primary_index(bucket_name)
         except Exception as e:
-            logger.error(f"Error creating primary index for bucket {bucket_name}: {e}", exc_info=True)
+            try:
+                self.cb_dal.drop_primary_index(bucket_name)
+                self.cb_dal.create_primary_index(bucket_name)
+                self.cb_dal.build_primary_index(bucket_name)
+                logger.info(f"Primary index created and built for bucket: {bucket_name.upper()}")
+            except Exception as e:
+                logger.error(f"Error creating primary index for bucket {bucket_name}: {e}", exc_info=True)
+                raise e
+            

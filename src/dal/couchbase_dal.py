@@ -2,6 +2,7 @@ from datetime import timedelta
 import os
 import sys
 import gc
+import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import CouchbaseConfig
@@ -22,7 +23,7 @@ class CouchbaseDataAccess:
         self.cluster = None
         self.bucket = None
         
-    def connect(self, timeout: timedelta = timedelta(seconds=30)):
+    def connect(self, timeout: timedelta = timedelta(seconds=300)):
         """
         Connect to Couchbase cluster with configurable timeout
         
@@ -35,7 +36,7 @@ class CouchbaseDataAccess:
             
             # Configure timeout options
             timeout_opts = ClusterTimeoutOptions(
-                connect_timeout=timedelta(seconds=30),
+                connect_timeout=timeout,
                 kv_timeout=timedelta(seconds=30),
                 query_timeout=timedelta(seconds=120),
                 analytics_timeout=timedelta(seconds=120),
@@ -55,14 +56,9 @@ class CouchbaseDataAccess:
             return self.cluster
         except CouchbaseException as e:
             error_msg = str(e)
-            if "timeout" in error_msg.lower() or "unambiguous_timeout" in error_msg.lower():
+            if "timeout" in error_msg.lower():
                 logger.error(
                     f"Timeout connecting to Couchbase cluster at {self.config.host}. "
-                    f"This could be due to:\n"
-                    f"  1. Network connectivity issues\n"
-                    f"  2. Couchbase server is not running or unreachable\n"
-                    f"  3. Firewall blocking the connection\n"
-                    f"  4. Incorrect host/port configuration\n"
                     f"Current timeout: {timeout.total_seconds()}s\n"
                     f"Error: {e}",
                     exc_info=True
@@ -302,12 +298,12 @@ class CouchbaseDataAccess:
                 return (False, False)
             
             # Check if index is online
-            index_info = indexes[0]
+            index_info = indexes[0].get('indexes', '')
             if isinstance(index_info, dict):
                 state = index_info.get('state', '').lower()
             else:
                 state = str(getattr(index_info, 'state', '')).lower()
-            is_online = state == 'ready'
+            is_online = state == 'online'
             return (True, is_online)
         except CouchbaseException as e:
             error_msg = str(e).lower()
@@ -322,6 +318,24 @@ class CouchbaseDataAccess:
             self.close()
             gc.collect()
     
+    def drop_primary_index(self, bucket_name: str):
+        """
+        Drop primary index on the bucket.
+        """
+        try:
+            cluster = self.connect()
+            query = f'DROP PRIMARY INDEX ON `{bucket_name}`;'
+            query_options = QueryOptions(client_context_id=str(uuid.uuid4()))
+            cluster.query(query, query_options).execute()
+            logger.info(f"Primary index dropped for bucket: {bucket_name.upper()}")
+        except CouchbaseException as e:
+            logger.error(f"Error dropping primary index: {e}", exc_info=True)
+            raise e
+        finally:
+            self.close()
+            gc.collect()
+            
+    
     def create_primary_index(self, bucket_name: str):
         """
         Create a primary index on the bucket.
@@ -332,13 +346,29 @@ class CouchbaseDataAccess:
         """
         try:
             cluster = self.connect()
-            query = f"CREATE PRIMARY INDEX ON `{bucket_name}`"
-            logger.info(f"Creating primary index on bucket: {bucket_name}")
+            query = f'CREATE PRIMARY INDEX ON `{bucket_name}` WITH {{"defer_build": true}};'
             query_options = QueryOptions(client_context_id=str(uuid.uuid4()))
             cluster.query(query, query_options).execute()
-            logger.info(f"Primary index creation initiated for bucket: {bucket_name}")
+            logger.info(f"Primary index creation initiated for bucket: {bucket_name.upper()}")
         except CouchbaseException as e:
             logger.error(f"Error creating primary index: {e}", exc_info=True)
+            raise e
+        finally:
+            self.close()
+            gc.collect()
+
+    def build_primary_index(self, bucket_name: str):
+        """
+        Build primary index on the bucket.
+        """
+        try:
+            cluster = self.connect()
+            query = f'BUILD INDEX ON `{bucket_name}` (`#primary`);'
+            query_options = QueryOptions(client_context_id=str(uuid.uuid4()))
+            cluster.query(query, query_options).execute()
+            logger.info(f"Primary index build initiated for bucket: {bucket_name.upper()}")
+        except CouchbaseException as e:
+            logger.error(f"Error building primary index: {e}", exc_info=True)
             raise e
         finally:
             self.close()
@@ -394,10 +424,12 @@ class CouchbaseDataAccess:
         return False
     
     def get_data_paginated(self, bucket_name: str, page_size: int = 1000, offset: int = 0, 
-                          select_fields: str = "meta().id,*", where_clause: str = None, 
-                          order_by: str = None, debug: bool = False):
+                          select_fields: str = "meta().id, *", where_clause: str = None, 
+                          order_by: str = None, debug: bool = False, max_retries: int = 3, 
+                          retry_delay: int = 2):
         """
-        Get data from bucket with pagination support.
+        Get data from bucket with pagination support and retry logic.
+        Nếu có lỗi (timeout hoặc connection), sẽ retry bằng cách gọi lại chính nó.
         
         Args:
             bucket_name: Name of the bucket
@@ -407,35 +439,55 @@ class CouchbaseDataAccess:
             where_clause: Optional WHERE clause (without WHERE keyword)
             order_by: Optional ORDER BY clause (without ORDER BY keywords)
             debug: If True, print debug information
+            max_retries: Maximum number of retry attempts (default: 3)
+            retry_delay: Delay in seconds between retries (default: 2)
             
         Returns:
-            list: List of dictionaries containing the data
+            list: List of dictionaries containing the data, or empty list if all retries fail
         """
-        try:
-            # Build query
-            query = f"SELECT {select_fields} FROM `{bucket_name}`"
-            
-            if where_clause:
-                query += f" WHERE {where_clause}"
-            
-            if order_by:
-                query += f" ORDER BY {order_by}"
-            
-            query += f" LIMIT {page_size} OFFSET {offset}"
-            
-            logger.debug(f"Executing paginated query: {query}")
-            return self.get_data(query, debug=debug)
-        except CouchbaseException as e:
-            logger.error(f"Error getting paginated data: {e}", exc_info=True)
-            raise e
+        # Build query
+        query = f"SELECT {select_fields} FROM `{bucket_name}`"
+        if where_clause:
+            query += f" WHERE {where_clause}"
+        if order_by:
+            query += f" ORDER BY {order_by}"
+        query += f" LIMIT {page_size} OFFSET {offset}"
+        
+        for attempt in range(max_retries):
+            try:
+                logger.debug(f"Executing paginated query (attempt {attempt + 1}/{max_retries}): offset={offset}, limit={page_size}")
+                return self.get_data(query, debug=debug)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (attempt + 1)  # Exponential backoff
+                    logger.warning(
+                        f"Error at offset {offset} (attempt {attempt + 1}/{max_retries}). "
+                        f"Retrying in {wait_time} seconds... Error: {e}"
+                    )
+                    time.sleep(wait_time)
+                    # Tiếp tục vòng lặp để retry
+                    continue
+                else:
+                    # Đã hết số lần retry, ghi nhận lỗi và trả về empty list
+                    logger.error(
+                        f"Failed to get data for {bucket_name.upper()} at offset {offset} after {max_retries} attempts. "
+                        f"Error: {e}. Skipping this page.",
+                        exc_info=True
+                    )
+                    return []
+        
+        # Nếu đến đây thì đã hết retry
+        logger.error(f"Failed to get data at offset {offset} after {max_retries} attempts. Skipping this page.")
+        return []
     
     def get_all_data_paginated(self, bucket_name: str, page_size: int = 1000,
                                select_fields: str = "meta().id,*", where_clause: str = None,
                                order_by: str = None, max_records: int = None, 
-                               debug: bool = False):
+                               debug: bool = False, max_retries: int = 3, 
+                               retry_delay: int = 2):
         """
         Generator function to fetch all data from bucket using pagination.
-        Yields data page by page.
+        Yields data page by page. get_data_paginated đã xử lý retry và trả về empty list nếu lỗi.
         
         Args:
             bucket_name: Name of the bucket
@@ -445,58 +497,67 @@ class CouchbaseDataAccess:
             order_by: Optional ORDER BY clause (without ORDER BY keywords)
             max_records: Maximum total records to fetch (None = all records)
             debug: If True, print debug information
+            max_retries: Maximum number of retry attempts (default: 3)
+            retry_delay: Delay in seconds between retries (default: 2)
             
         Yields:
-            list: List of dictionaries for each page
+            tuple: (offset, list) - Offset and list of dictionaries for each page
         """
         offset = 0
         total_fetched = 0
+        consecutive_empty_pages = 0
+        max_consecutive_empty = 10  # Stop if too many consecutive empty pages (failed pages)
         
         logger.info(f"Starting paginated fetch from bucket: {bucket_name} (page_size: {page_size})")
         
         while True:
-            try:
-                # Fetch one page
-                page_data = self.get_data_paginated(
-                    bucket_name=bucket_name,
-                    page_size=page_size,
-                    offset=offset,
-                    select_fields=select_fields,
-                    where_clause=where_clause,
-                    order_by=order_by,
-                    debug=debug
-                )
-                
-                if not page_data or len(page_data) == 0:
-                    logger.info(f"No more data to fetch. Total fetched: {total_fetched}")
+            # Fetch one page (đã có retry logic bên trong)
+            page_data = self.get_data_paginated(
+                bucket_name=bucket_name,
+                page_size=page_size,
+                offset=offset,
+                select_fields=select_fields,
+                where_clause=where_clause,
+                order_by=order_by,
+                debug=debug,
+                max_retries=max_retries,
+                retry_delay=retry_delay
+            )
+            
+            if not page_data or len(page_data) == 0:
+                consecutive_empty_pages += 1
+                if consecutive_empty_pages >= max_consecutive_empty:
+                    logger.warning(
+                        f"Too many consecutive empty/failed pages ({consecutive_empty_pages}). "
+                        f"Stopping pagination. Total fetched: {total_fetched}"
+                    )
                     break
-                
-                # Yield the page
-                yield page_data
-                
-                # Update counters
-                page_count = len(page_data)
-                total_fetched += page_count
+                # Skip empty page và tiếp tục
                 offset += page_size
-                
-                logger.debug(f"Fetched page: {page_count} records, Total: {total_fetched}")
-                
-                # Check if we've reached max_records
-                if max_records and total_fetched >= max_records:
-                    logger.info(f"Reached max_records limit: {max_records}")
-                    break
-                
-                # If page has fewer records than page_size, we've reached the end
-                if page_count < page_size:
-                    logger.info(f"Reached end of data. Total fetched: {total_fetched}")
-                    break
-                    
-            except CouchbaseException as e:
-                logger.error(f"Error fetching page at offset {offset}: {e}", exc_info=True)
-                raise e
-            except Exception as e:
-                logger.error(f"Unexpected error fetching page at offset {offset}: {e}", exc_info=True)
-                raise e
+                continue
+            
+            # Reset counter khi có data
+            consecutive_empty_pages = 0
+            
+            # Yield the page with offset info
+            yield (offset, page_data)
+            
+            # Update counters
+            page_count = len(page_data)
+            total_fetched += page_count
+            offset += page_size
+            
+            logger.debug(f"Fetched page at offset {offset - page_size}: {page_count} records, Total: {total_fetched}")
+            
+            # Check if we've reached max_records
+            if max_records and total_fetched >= max_records:
+                logger.info(f"Reached max_records limit: {max_records}")
+                break
+            
+            # If page has fewer records than page_size, we've reached the end
+            if page_count < page_size:
+                logger.info(f"Reached end of data. Total fetched: {total_fetched}")
+                break
     
     def get_total_count(self, bucket_name: str, where_clause: str = None):
         """

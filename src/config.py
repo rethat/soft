@@ -20,3 +20,4 @@ class MongoDBConfig:
         self.user = os.getenv("MONGODB_USER", "admin")
         self.password = os.getenv("MONGODB_PASSWORD", "password")
         self.db = os.getenv("MONGODB_DB_NAME", "migra")
+        self.tls = os.getenv("MONGODB_TLS", "false")

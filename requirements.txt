@@ -1,3 +1,4 @@
 couchbase
 python-dotenv
 pymongo
+certifi

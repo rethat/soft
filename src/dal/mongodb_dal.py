@@ -1,6 +1,8 @@
 import os
 import sys
 import gc
+
+from pymongo.common import MAX_IDLE_TIME_MS
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import MongoDBConfig
@@ -21,7 +23,13 @@ class MongoDBDataAccess:
     def connect(self):
         try:
             connection_string = f"mongodb://{self.config.user}:{self.config.password}@{self.config.host}:{self.config.port}"
-            self.client = MongoClient(connection_string, serverSelectionTimeoutMS=30000)
+            # connection_string = f"mongodb+srv://{self.config.user}:{self.config.password}@{self.config.host}:{self.config.port}?authMechanism=SCRAM-SHA-256&retryWrites=false"
+            if self.config.tls == "true":
+                import certifi as cert
+                self.client = MongoClient(connection_string, tls=True, tlsCAFile= cert.where(), serverSelectionTimeoutMS=30000, maxIdleTimeMS=120000)
+            else:
+                self.client = MongoClient(connection_string, serverSelectionTimeoutMS=30000, maxIdleTimeMS=120000)
+            
             self.database = self.client[self.config.db]
             return self.client
         except ConnectionFailure as e:
