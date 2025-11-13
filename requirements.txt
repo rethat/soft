@@ -1,0 +1,3 @@
+couchbase
+python-dotenv
+pymongo
