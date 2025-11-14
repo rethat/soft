@@ -579,21 +579,50 @@ class CouchbaseDataAccess:
             query_options = QueryOptions(client_context_id=str(uuid.uuid4()))
             result = cluster.query(query, query_options)
             
+            # Check for errors in result metadata
+            if hasattr(result, 'metadata') and hasattr(result.metadata, 'warnings'):
+                warnings = result.metadata.warnings
+                if warnings:
+                    logger.warning(f"Query warnings for bucket {bucket_name}: {warnings}")
+            
+            row_count = 0
             for row in result.rows():
+                row_count += 1
                 if isinstance(row, dict):
-                    return row.get('count', 0)
+                    count_value = row.get('count', 0)
+                    logger.debug(f"Count result for bucket {bucket_name}: {count_value}")
+                    return count_value
                 else:
                     try:
                         row_dict = dict(row)
-                        return row_dict.get('count', 0)
-                    except:
+                        count_value = row_dict.get('count', 0)
+                        logger.debug(f"Count result for bucket {bucket_name}: {count_value}")
+                        return count_value
+                    except Exception as dict_err:
+                        logger.debug(f"Error converting row to dict: {dict_err}")
                         if hasattr(row, 'count'):
-                            return row.count
-                        return 0
+                            count_value = row.count
+                            return count_value
+                        # Try accessing as dict-like
+                        try:
+                            count_value = row['count']
+                            return count_value
+                        except:
+                            pass
+            
+            if row_count == 0:
+                logger.warning(f"No rows returned from count query for bucket {bucket_name}")
             
             return 0
         except CouchbaseException as e:
-            logger.error(f"Error getting total count: {e}", exc_info=True)
+            error_msg = str(e).lower()
+            logger.error(f"Error getting total count for bucket {bucket_name}: {e}", exc_info=True)
+            # Check if it's an index-related error
+            if "index" in error_msg or "no index" in error_msg or "GSI" in error_msg:
+                logger.error(f"Index may not be available for bucket {bucket_name}. Please ensure primary index is created and online.")
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error getting total count for bucket {bucket_name}: {e}", exc_info=True)
             raise e
         finally:
             self.close()

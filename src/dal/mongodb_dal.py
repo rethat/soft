@@ -74,3 +74,21 @@ class MongoDBDataAccess:
         finally:
             self.close()
             gc.collect()
+
+    def drop_collections(self):
+        try:
+            self.connect()
+            collection_names = self.database.list_collection_names()
+            for collection in collection_names:
+                if collection.startswith("rms_"):
+                    self.database[collection].drop()
+            logger.info(f"Successfully dropped {len(collection_names)} collections from MongoDB")
+        except PyMongoError as e:
+            logger.error(f"Error dropping collection from MongoDB: {e}", exc_info=True)
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error dropping collection from MongoDB: {e}", exc_info=True)
+            raise e
+        finally:
+            self.close()
+            gc.collect()

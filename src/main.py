@@ -1,7 +1,7 @@
 
 import logging
-import json
-import pandas as pd
+# import json
+# import pandas as pd
 import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -99,10 +99,17 @@ def migrate_bucket(bucket_name: str, page_size: int = 1000, max_workers: int = 5
         # Lấy tổng số documents để tính số pages
         cb_config = CouchbaseConfig()
         cb_dal = CouchbaseDataAccess(cb_config)
-        total_count = cb_dal.get_total_count(bucket_name)
+        
+        try:
+            total_count = cb_dal.get_total_count(bucket_name)
+        except Exception as count_error:
+            logger.error(f"Failed to get total count for bucket {bucket_name.upper()}: {count_error}", exc_info=True)
+            logger.error(f"This may indicate that the primary index is not available or the bucket is not accessible.")
+            raise count_error
         
         if total_count == 0:
-            logger.warning(f"No data found in bucket {bucket_name.upper()}")
+            logger.warning(f"No data found in bucket {bucket_name.upper()} (count query returned 0)")
+            logger.info(f"Note: This could mean the bucket is empty, or there may be an issue with the query/index.")
             return
         
         # Tính số pages
@@ -145,7 +152,7 @@ def migrate_bucket(bucket_name: str, page_size: int = 1000, max_workers: int = 5
         
         logger.info(f"Migration completed: {total_processed}/{total_count} records processed")
         if failed_pages:
-            logger.warning(f"Failed to process {len(failed_pages)} pages: {failed_pages[:10]}...")
+            logger.warning(f"{bucket_name.upper()}: Failed to process {len(failed_pages)} pages: {failed_pages[:10]}...")
             
     except Exception as e:
         logger.error(f"Error migrating bucket {bucket_name}: {e}", exc_info=True)
@@ -164,9 +171,16 @@ def create_index(bucket_name: str):
         while not state:
             time.sleep(1)
             _, state = couchbase_service.check_index_status(bucket_name)
-        logger.info("Bucket {bucket_name.upper()} is ready to fetch data")
+        logger.info(f"Bucket {bucket_name.upper()} is ready to fetch data")
     except Exception as e:
         logger.error(f"Error creating primary index for bucket {bucket_name}: {e}", exc_info=True)
+
+def drop_collections():
+    try:
+        mongo_service = MongoDBService(MongoDBDataAccess(MongoDBConfig()))
+        mongo_service.drop_collections()
+    except Exception as e:
+        logger.error(f"Error dropping collections from MongoDB: {e}", exc_info=True)
 
 if __name__ == "__main__":
     # Configuration
@@ -176,7 +190,8 @@ if __name__ == "__main__":
     retry_delay = 2  # Thời gian delay giữa các retry (giây)
     
     start_time = time.time()
-    for bucket_name in [RMS_BUCKET_LIST]:
+    drop_collections()
+    for bucket_name in RMS_BUCKET_LIST:
         # check and create index if not exists
         create_index(bucket_name)
 
