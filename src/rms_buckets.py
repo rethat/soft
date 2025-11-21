@@ -68,7 +68,7 @@ def process_page(db_name: str, bucket_name: str, page: int, page_size: int, max_
         mongo_dal = MongoDBDataAccess(mongo_config)
         mongo_service = MongoDBService(mongo_dal, mapping_id=True)
         
-        mongo_service.add_documents(bucket_name, page_data)
+        mongo_service.process_rms_data(bucket_name, page_data)
         mongo_dal = None
         
         with fetch_lock:
@@ -216,6 +216,14 @@ if __name__ == "__main__":
                 max_retries=max_retries,
                 retry_delay=retry_delay
             )
+            # process_page(
+            #     db_name=db_name,
+            #     bucket_name=bucket_name,
+            #     page=0,
+            #     page_size=10,
+            #     max_retries=max_retries,
+            #     retry_delay=retry_delay
+            # )
             
     total_time = time.time() - start_time
     logger.info("=" * 60)

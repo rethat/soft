@@ -176,3 +176,75 @@ class MongoDBService:
         except Exception as e:
             logger.error(f"Error dropping collections from MongoDB: {e}", exc_info=True)
             raise e
+
+
+    def process_rms_data(self, bucket_name: str, data: list):
+        default_group_key = "Others"
+        group = {}
+        def convert_to_dict(value):
+            if isinstance(value, str):
+                try:
+                    # First try to parse directly
+                    processed_doc = json.loads(value)
+                    if not isinstance(processed_doc, dict):
+                        # If parsed result is not a dict, keep original structure
+                        return None
+                except (json.JSONDecodeError, ValueError) as e:
+                    # If direct parse fails, try to normalize the string first
+                    try:
+                        normalized_str = self._normalize_json_string(value)
+                        processed_doc = json.loads(normalized_str)
+                        if not isinstance(processed_doc, dict):
+                            return None
+                    except (json.JSONDecodeError, ValueError) as e2:
+                        logger.warning(f"Failed to parse JSON string for collection {bucket_name}: {e2}")
+                        return None
+                return processed_doc
+            elif isinstance(value, dict):
+                return value
+            else:
+                return None
+
+        for doc in data:
+            _document = doc.copy()
+            rms_dict = convert_to_dict(_document.get(bucket_name))
+            typekey = rms_dict.get('typekey') if isinstance(rms_dict, dict) else None
+            
+            group_key = typekey if typekey else default_group_key
+            if group_key not in group:
+                group[group_key] = []
+                
+            if isinstance(rms_dict, dict):
+                rms_dict['bucket_name'] = bucket_name
+                rms_dict['id'] = _document.get('id')
+                if 'typekey' in rms_dict:
+                    del rms_dict['typekey']
+                    
+            if self.mapping_id and isinstance(rms_dict, dict):
+                if 'id' in rms_dict and 'value' in rms_dict:
+                    if isinstance(rms_dict['value'], dict):
+                        inner_doc = rms_dict['value'].copy()
+                        inner_doc['_id'] = rms_dict['id']
+                        if 'id' in inner_doc:
+                            del inner_doc['id']
+                        rms_dict = inner_doc
+                elif 'id' in rms_dict:
+                    rms_dict['_id'] = rms_dict['id']
+                    del rms_dict['id']
+            
+            group[group_key].append(rms_dict)
+        
+        # with(open(f'{bucket_name}_group.json', 'w')) as f:
+        #     json.dump(group, f, indent=2, ensure_ascii=False)
+
+        for group_key, group_value in group.items():
+            self.add_documents(group_key, group_value)
+
+
+
+    def add_document(self, db_name: str, bucket_name: str, document: dict):
+        try:
+            self.mongo_dal.add_document(db_name, bucket_name, document)
+        except Exception as e:
+            logger.error(f"Error adding document to MongoDB: {e}", exc_info=True)
+            raise e

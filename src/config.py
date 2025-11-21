@@ -14,10 +14,10 @@ class CouchbaseConfig:
 
 class MongoDBConfig:
 
-    def __init__(self):
+    def __init__(self, database_name: str=None):
         self.host = os.getenv("MONGODB_HOST", "localhost")
         self.port = os.getenv("MONGODB_PORT", 27017)
         self.user = os.getenv("MONGODB_USER", "admin")
         self.password = os.getenv("MONGODB_PASSWORD", "password")
-        self.db = os.getenv("MONGODB_DB_NAME", "migra")
         self.tls = os.getenv("MONGODB_TLS", "false")
+        self.database = database_name if database_name else os.getenv("MONGODB_DB_NAME", "migra")

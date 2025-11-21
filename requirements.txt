@@ -2,3 +2,6 @@ couchbase
 python-dotenv
 pymongo
 certifi
+matplotlib
+numpy
+seaborn

@@ -29,8 +29,7 @@ class MongoDBDataAccess:
                 self.client = MongoClient(connection_string, tls=True, tlsCAFile= cert.where(), serverSelectionTimeoutMS=30000, maxIdleTimeMS=120000)
             else:
                 self.client = MongoClient(connection_string, serverSelectionTimeoutMS=30000, maxIdleTimeMS=120000)
-            
-            self.database = self.client[self.config.db]
+            self.database = self.client[self.config.database]
             return self.client
         except ConnectionFailure as e:
             logger.error(f"Error connecting to MongoDB: {e}", exc_info=True)
@@ -80,8 +79,8 @@ class MongoDBDataAccess:
             self.connect()
             collection_names = self.database.list_collection_names()
             for collection in collection_names:
-                if collection.startswith("rms_"):
-                    self.database[collection].drop()
+                # if collection.startswith("rms_"):
+                self.database[collection].drop()
             logger.info(f"Successfully dropped {len(collection_names)} collections from MongoDB")
         except PyMongoError as e:
             logger.error(f"Error dropping collection from MongoDB: {e}", exc_info=True)

@@ -277,7 +277,7 @@ class CouchbaseDataAccess:
             
             cluster = self.connect()
             # Query to check index status from system:indexes
-            query = f"SELECT * FROM system:indexes WHERE keyspace_id = '{bucket_name}' AND name = '{index_name}'"
+            query = f"SELECT * FROM system:indexes WHERE keyspace_id = '{bucket_name}' AND name = '{index_name}' and is_primary = true"
             query_options = QueryOptions(client_context_id=str(uuid.uuid4()))
             result = cluster.query(query, query_options)
             
@@ -301,10 +301,12 @@ class CouchbaseDataAccess:
             index_info = indexes[0].get('indexes', '')
             if isinstance(index_info, dict):
                 state = index_info.get('state', '').lower()
+                # index_key = len(index_info.get('index_key', []))
             else:
                 state = str(getattr(index_info, 'state', '')).lower()
-            is_online = state == 'online'
-            return (True, is_online)
+                # index_key = len(getattr(index_info, 'index_key', []))
+            is_ready = state == 'online' # and index_key > 0
+            return (True, is_ready)
         except CouchbaseException as e:
             error_msg = str(e).lower()
             if "index" in error_msg and "not found" in error_msg:
@@ -346,7 +348,7 @@ class CouchbaseDataAccess:
         """
         try:
             cluster = self.connect()
-            query = f'CREATE PRIMARY INDEX ON `{bucket_name}` WITH {{"defer_build": true}};'
+            query = f'CREATE PRIMARY INDEX `#primary` ON `{bucket_name}` WITH {{"defer_build": true}};'
             query_options = QueryOptions(client_context_id=str(uuid.uuid4()))
             cluster.query(query, query_options).execute()
             logger.info(f"Primary index creation initiated for bucket: {bucket_name.upper()}")
@@ -571,7 +573,7 @@ class CouchbaseDataAccess:
             int: Total count of documents
         """
         try:
-            query = f"SELECT COUNT(*) as count FROM `{bucket_name}`"
+            query = f"SELECT COUNT(*) as count FROM `{bucket_name}` USE INDEX(`#primary`)"
             if where_clause:
                 query += f" WHERE {where_clause}"
             
