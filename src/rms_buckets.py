@@ -1,4 +1,4 @@
-
+import os
 import logging
 import json
 # import pandas as pd
@@ -15,6 +15,10 @@ from logger_config import setup_logging, get_logger
 from services.couchbase_service import CouchbaseService
 from services.mongodb_service import MongoDBService
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_SETTING_PATH = os.path.join(BASE_DIR, "dbsetting.json")
+
+
 # Setup logging
 setup_logging(log_dir='logs', log_level=logging.DEBUG)
 logger = get_logger(__name__)
@@ -24,7 +28,7 @@ fetch_lock = Lock()
 
 # RMS_BUCKET_LIST = ["rms_events","rms_journal","rms_rating_model","rms_read_model","rms_view","rms_write_model"]
 
-DB_SETTING = json.load(open('./src/dbsetting.json', 'r'))
+DB_SETTING = json.load(open(DB_SETTING_PATH, 'r'))
 
 def process_page(db_name: str, bucket_name: str, page: int, page_size: int, max_retries: int = 3, retry_delay: int = 2):
     """
