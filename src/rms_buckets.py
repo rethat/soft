@@ -51,6 +51,11 @@ def process_page(db_name: str, bucket_name: str, page: int, page_size: int, max_
     
     try:
         # Fetch data từ Couchbase
+        
+        logger.info(f"=" * 90)
+        logger.info(f"Fetching data from Couchbase: {bucket_name.upper()} (page {page}, offset {offset})")
+        logger.info(f"=" * 90)
+
         cb_config = CouchbaseConfig()
         cb_dal = CouchbaseDataAccess(cb_config)
         
@@ -68,6 +73,10 @@ def process_page(db_name: str, bucket_name: str, page: int, page_size: int, max_
             return (page, 0)
         
         # Insert vào MongoDB
+        logger.info(f"=" * 90)
+        logger.info(f"Inserting data into MongoDB: (DB: {db_name.upper()}, bucket: {bucket_name.upper()}, page {page}, offset {offset})")
+        logger.info(f"=" * 90)
+
         mongo_config = MongoDBConfig(db_name)
         mongo_dal = MongoDBDataAccess(mongo_config)
         mongo_service = MongoDBService(mongo_dal, mapping_id=True)

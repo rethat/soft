@@ -21,3 +21,6 @@ class MongoDBConfig:
         self.password = os.getenv("MONGODB_PASSWORD", "password")
         self.tls = os.getenv("MONGODB_TLS", "false")
         self.database = database_name if database_name else os.getenv("MONGODB_DB_NAME", "migra")
+        
+        _connection_string = f"mongodb://{self.user}:{self.password}@{self.host}:{self.port}"
+        self.connection_string = os.getenv("MONGODB_CONNECTION_STRING", _connection_string)

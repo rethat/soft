@@ -22,8 +22,7 @@ class MongoDBDataAccess:
 
     def connect(self):
         try:
-            connection_string = f"mongodb://{self.config.user}:{self.config.password}@{self.config.host}:{self.config.port}"
-            # connection_string = f"mongodb+srv://{self.config.user}:{self.config.password}@{self.config.host}:{self.config.port}?authMechanism=SCRAM-SHA-256&retryWrites=false"
+            connection_string = self.config.connection_string
             if self.config.tls == "true":
                 import certifi as cert
                 self.client = MongoClient(connection_string, tls=True, tlsCAFile= cert.where(), serverSelectionTimeoutMS=30000, maxIdleTimeMS=120000)
