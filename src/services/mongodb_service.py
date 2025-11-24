@@ -266,7 +266,7 @@ class MongoDBService:
                 if isinstance(rms_dict, dict):
                     rms_dict = rms_dict.copy()  # Make a copy to avoid modifying original
                     rms_dict['bucket_name'] = bucket_name
-                    rms_dict['id'] = _document.get('id')
+                    rms_dict['id'] = f"{bucket_name[4:]}-{_document.get('id')}" # add bucket name there to avoid duplicate id
                     if 'typekey' in rms_dict:
                         del rms_dict['typekey']
                         
@@ -315,5 +315,5 @@ class MongoDBService:
         try:
             self.mongo_dal.add_document(db_name, bucket_name, document)
         except Exception as e:
-            logger.error(f"Error adding document to MongoDB: {e}", exc_info=True)
+            logger.error(f"{bucket_name.upper()}: Error adding document to MongoDB: {e}", exc_info=True)
             raise e

@@ -457,29 +457,36 @@ class CouchbaseDataAccess:
         
         for attempt in range(max_retries):
             try:
-                logger.debug(f"Executing paginated query (attempt {attempt + 1}/{max_retries}): offset={offset}, limit={page_size}")
+                logger.debug(f"=" * 140)
+                logger.debug(f"Executing to fetch data from bucket {bucket_name.upper()} with: offset={offset}, limit={page_size}")
+                logger.debug(f"Query: {query}")
+                logger.debug(f"=" * 140)
                 return self.get_data(query, debug=debug)
             except Exception as e:
                 if attempt < max_retries - 1:
                     wait_time = retry_delay * (attempt + 1)  # Exponential backoff
-                    logger.warning(
-                        f"Error at offset {offset} (attempt {attempt + 1}/{max_retries}). "
-                        f"Retrying in {wait_time} seconds... Error: {e}"
-                    )
+                    # logger.warning(
+                    #     f"Error at offset {offset} (attempt {attempt + 1}/{max_retries}). "
+                    #     f"Retrying in {wait_time} seconds... Error: {e}"
+                    # )
                     time.sleep(wait_time)
                     # Tiếp tục vòng lặp để retry
                     continue
                 else:
                     # Đã hết số lần retry, ghi nhận lỗi và trả về empty list
                     logger.error(
-                        f"Failed to get data for {bucket_name.upper()} at offset {offset} after {max_retries} attempts. "
+                        f"Failed to get data for {bucket_name.upper()} at offset {offset} with page_size {page_size} after {max_retries} attempts. "
                         f"Error: {e}. Skipping this page.",
                         exc_info=True
                     )
                     return []
         
         # Nếu đến đây thì đã hết retry
-        logger.error(f"Failed to get data at offset {offset} after {max_retries} attempts. Skipping this page.")
+        logger.error(f"=" * 120)
+        logger.error(f"Bucket: {bucket_name.upper()}."
+                     f"Failed to get data at offset {offset} with page_size {page_size}."
+                     f"Skipping this page for bucket {bucket_name.upper()} after {max_retries} attempts.")
+        logger.error(f"=" * 120)
         return []
     
     def get_all_data_paginated(self, bucket_name: str, page_size: int = 1000,
