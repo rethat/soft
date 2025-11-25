@@ -274,8 +274,6 @@ class MongoDBService:
                         rms_dict = rms_dict.copy()  # Make a copy to avoid modifying original
                         rms_dict['bucket_name'] = bucket_name
                         rms_dict['id'] = f"{bucket_name[4:]}-{_document.get('id')}" # add bucket name there to avoid duplicate id
-                        if 'typekey' in rms_dict:
-                            del rms_dict['typekey']
                             
                     if self.mapping_id and isinstance(rms_dict, dict):
                         if 'id' in rms_dict and 'value' in rms_dict:
