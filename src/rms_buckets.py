@@ -69,14 +69,10 @@ def process_page(db_name: str, bucket_name: str, page: int, page_size: int, max_
         
         if not page_data or len(page_data) == 0:
             with fetch_lock:
-                logger.info(f"Page {page} (offset {offset}): No data found")
+                logger.info(f"{bucket_name.upper()} Page {page} (offset {offset}): NO_DATA_FOUND")
             return (page, 0)
         
         # Insert vào MongoDB
-        logger.info(f"=" * 90)
-        logger.info(f"Inserting data into MongoDB: (DB: {db_name.upper()}, bucket: {bucket_name.upper()}, page {page}, offset {offset})")
-        logger.info(f"=" * 90)
-
         mongo_config = MongoDBConfig(db_name)
         mongo_dal = MongoDBDataAccess(mongo_config)
         mongo_service = MongoDBService(mongo_dal, mapping_id=True)
@@ -85,13 +81,13 @@ def process_page(db_name: str, bucket_name: str, page: int, page_size: int, max_
         mongo_dal = None
         
         with fetch_lock:
-            logger.info(f"Page {page} (offset {offset}): Successfully processed {len(page_data)} records")
+            logger.info(f"{bucket_name.upper()} Page {page} (offset {offset}): Successfully processed {len(page_data)} records")
         
         return (page, len(page_data))
         
     except Exception as e:
         with fetch_lock:
-            logger.error(f"Error processing page {page} (offset {offset}): {e}", exc_info=True)
+            logger.error(f"{bucket_name.upper()} Error processing page {page} (offset {offset}): {e}", exc_info=True)
         return (page, 0)
     finally:
         gc.collect()
@@ -166,7 +162,7 @@ def migrate_bucket(db_name: str, bucket_name: str, page_size: int = 1000, max_wo
                     logger.error(f"Error getting result for page {page}: {e}", exc_info=True)
                     failed_pages.append(page)
         
-        logger.info(f"Migration completed: {total_processed}/{total_count} records processed")
+        logger.info(f"{bucket_name.upper()}: Migration completed: {total_processed}/{total_count} records processed")
         if failed_pages:
             logger.warning(f"{bucket_name.upper()}: Failed to process {len(failed_pages)} pages: {failed_pages[:10]}...")
             

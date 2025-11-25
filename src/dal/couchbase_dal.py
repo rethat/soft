@@ -457,10 +457,10 @@ class CouchbaseDataAccess:
         
         for attempt in range(max_retries):
             try:
-                logger.debug(f"=" * 140)
+                logger.debug(f"=" * 90)
                 logger.debug(f"Executing to fetch data from bucket {bucket_name.upper()} with: offset={offset}, limit={page_size}")
                 logger.debug(f"Query: {query}")
-                logger.debug(f"=" * 140)
+                logger.debug(f"=" * 90)
                 return self.get_data(query, debug=debug)
             except Exception as e:
                 if attempt < max_retries - 1:

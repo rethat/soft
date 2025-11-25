@@ -4,6 +4,7 @@ import json
 # import pandas as pd
 import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from multiprocessing import process
 from threading import Lock
 import time
 
@@ -26,99 +27,76 @@ fetch_lock = Lock()
 
 DB_SETTING = json.load(open('./src/dbsetting.json', 'r'))
 
-def process_page(db_name: str, bucket_name: str, page: int, page_size: int, max_retries: int = 3, retry_delay: int = 2):
+def process_page(db_name: str, bucket_name: str, migrate_keep_structure: bool, page: int, page_size: int, max_retries: int = 3, retry_delay: int = 2):
     """
-    Fetch một page từ Couchbase và insert vào MongoDB.
-    Mỗi page được xử lý bởi 1 thread.
+    Fetch a page from Couchbase and insert into MongoDB.
     
     Args:
-        bucket_name: Tên bucket Couchbase (cũng là tên collection MongoDB)
-        page: Số thứ tự page (bắt đầu từ 0)
-        page_size: Số records mỗi page
-        max_retries: Số lần retry tối đa
-        retry_delay: Thời gian delay giữa các retry
+        db_name: MongoDB database name
+        bucket_name: Couchbase bucket name (also the MongoDB collection name)
+        migrate_keep_structure: True if migrate data with original structure, False if migrate data with RMS structure
+        page: Page number (starts from 0)
+        page_size: Number of records per page (default: 1000)
+        max_retries: Maximum number of retries (default: 3)
+        retry_delay: Delay between retries (default: 2)
         
     Returns:
-        tuple: (page, success_count) hoặc (page, 0) nếu thất bại
+        tuple: (page, success_count) or (page, 0) if failed (NO_DATA_FOUND)
     """
-    cb_dal = None
-    mongo_dal = None
-    offset = page * page_size
-    
+    cb_service = CouchbaseService(CouchbaseDataAccess(CouchbaseConfig()))
+    mongo_service = MongoDBService(MongoDBDataAccess(MongoDBConfig(db_name)), mapping_id=True)
     try:
-        # Fetch data từ Couchbase
-        cb_config = CouchbaseConfig()
-        cb_dal = CouchbaseDataAccess(cb_config)
-        
-        page_data = cb_dal.get_data_paginated(
+        # Fetch data from Couchbase
+        page_data = cb_service.get_data_paginated(
             bucket_name=bucket_name,
+            page=page,
             page_size=page_size,
-            offset=offset,
             max_retries=max_retries,
             retry_delay=retry_delay
         )
-        
-        if not page_data or len(page_data) == 0:
-            with fetch_lock:
-                logger.info(f"Page {page} (offset {offset}): No data found")
+        if page_data is None:
             return (page, 0)
-        
-        # Insert vào MongoDB
-        mongo_config = MongoDBConfig(db_name)
-        mongo_dal = MongoDBDataAccess(mongo_config)
-        mongo_service = MongoDBService(mongo_dal, mapping_id=True)
-        
-        mongo_service.add_documents(bucket_name, page_data)
-        mongo_dal = None
+        # Insert into MongoDB
+        if migrate_keep_structure:
+            mongo_service.add_documents(bucket_name, page_data)
+        else:
+            mongo_service.process_rms_data(bucket_name, page_data)
         
         with fetch_lock:
-            logger.info(f"Page {page} (offset {offset}): Successfully processed {len(page_data)} records")
+            logger.info(f"Page: {page}x size:{page*page_size}): Successfully processed {len(page_data)} records")
         
         return (page, len(page_data))
         
     except Exception as e:
         with fetch_lock:
-            logger.error(f"Error processing page {page} (offset {offset}): {e}", exc_info=True)
+            logger.error(f"Error processing page:{page} x size:{page_size} for {bucket_name.upper()}: {e}", exc_info=True)
         return (page, 0)
     finally:
+        del cb_service, mongo_service, page_data
         gc.collect()
 
-def migrate_bucket(db_name: str, bucket_name: str, page_size: int = 1000, max_workers: int = 5, 
+def migrate_bucket(db_name: str, bucket_name: str, migrate_keep_structure: bool, 
+                   page_size: int = 1000, max_workers: int = 5, 
                    max_retries: int = 3, retry_delay: int = 2):
     """
-    Migrate data từ Couchbase bucket sang MongoDB collection.
-    Mỗi page được xử lý bởi 1 thread: fetch từ Couchbase và insert vào MongoDB.
+    Migrate data from Couchbase bucket to MongoDB collection.
+    Each page is processed by 1 thread: fetch from Couchbase and insert into MongoDB.
     
     Args:
-        bucket_name: Tên bucket Couchbase (cũng là tên collection MongoDB)
-        page_size: Số records mỗi page
-        max_workers: Số threads tối đa
-        max_retries: Số lần retry tối đa cho mỗi page
-        retry_delay: Thời gian delay giữa các retry
+        db_name: MongoDB database name
+        bucket_name: Couchbase bucket name (also the MongoDB collection name)
+        migrate_keep_structure: True if migrate data with original structure, False if migrate data with RMS structure
+        page_size: Number of records per page (default: 1000)
+        max_workers: Maximum number of threads (default: 5)
+        max_retries: Maximum number of retries (default: 3)
+        retry_delay: Delay between retries (default: 2)
     """
-    cb_dal = None
+    cb_service = CouchbaseService(CouchbaseDataAccess(CouchbaseConfig()))
     try:
         # Lấy tổng số documents để tính số pages
-        cb_config = CouchbaseConfig()
-        cb_dal = CouchbaseDataAccess(cb_config)
-        
-        try:
-            total_count = cb_dal.get_total_count(bucket_name)
-        except Exception as count_error:
-            logger.error(f"Failed to get total count for bucket {bucket_name.upper()}: {count_error}", exc_info=True)
-            logger.error(f"This may indicate that the primary index is not available or the bucket is not accessible.")
-            raise count_error
-        
-        # if total_count == 0:
-        #     logger.warning(f"No data found in bucket {bucket_name.upper()} (count query returned 0)")
-        #     logger.info(f"Note: This could mean the bucket is empty, or there may be an issue with the query/index.")
-        #     return
-        
-        # Tính số pages
+        total_count = cb_service.get_total_count(bucket_name)
         total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
-        logger.info(f"Total documents: {total_count}, Total pages: {total_pages}, Page size: {page_size}")
-        
-        # Xử lý các pages song song bằng thread pool
+        logger.info(f"{bucket_name.upper()} Total documents: {total_count}, Total pages: {total_pages}, Page size: {page_size}")
         total_processed = 0
         failed_pages = []
         
@@ -129,6 +107,7 @@ def migrate_bucket(db_name: str, bucket_name: str, page_size: int = 1000, max_wo
                     process_page,
                     db_name,
                     bucket_name,
+                    migrate_keep_structure,
                     page,
                     page_size,
                     max_retries,
@@ -136,7 +115,7 @@ def migrate_bucket(db_name: str, bucket_name: str, page_size: int = 1000, max_wo
                 ): page
                 for page in range(total_pages)
             }
-            
+        
             # Thu thập kết quả khi hoàn thành
             completed = 0
             for future in as_completed(future_to_page):
@@ -153,13 +132,14 @@ def migrate_bucket(db_name: str, bucket_name: str, page_size: int = 1000, max_wo
                     logger.error(f"Error getting result for page {page}: {e}", exc_info=True)
                     failed_pages.append(page)
         
-        logger.info(f"Migration completed: {total_processed}/{total_count} records processed")
+        logger.info(f"{bucket_name.upper()} Migration completed: {total_processed}/{total_count} records processed")
         if failed_pages:
             logger.warning(f"{bucket_name.upper()}: Failed to process {len(failed_pages)} pages: {failed_pages[:10]}...")
             
     except Exception as e:
         logger.error(f"Error migrating bucket {bucket_name}: {e}", exc_info=True)
     finally:
+        del cb_service
         gc.collect()
 
 def create_index(bucket_name: str):
@@ -181,42 +161,91 @@ def create_index(bucket_name: str):
 
 def drop_collections(db_name: str):
     try:
-        mongo_config = MongoDBConfig(db_name)
-        mongo_dal = MongoDBDataAccess(mongo_config)
-        mongo_service = MongoDBService(mongo_dal)
+        mongo_service = MongoDBService(MongoDBDataAccess(MongoDBConfig(db_name)))
         mongo_service.drop_collections()
     except Exception as e:
         logger.error(f"Error dropping collections from MongoDB: {e}", exc_info=True)
+    finally:
+        gc.collect()
+    
+def migrate_all_buckets(migrate_keep_structure: bool, 
+                        page_size:int=1000, max_workers:int=8, max_retries:int=3, retry_delay:int=2):
+    '''
+    Migrate all buckets in setting file with parallel processing
+    migrate_keep_structure: True if migrate data with original structure, 
+    False if migrate data with RMS structure
+    '''
+    try:
+        for db_name, bucket_names in DB_SETTING.items():
+            drop_collections(db_name)
+            for bucket_name in bucket_names:
+                # check and create index if not exists
+                create_index(bucket_name)
 
+                logger.info("=" * 60)
+                logger.info(f"Migrating bucket: {bucket_name.upper()}")
+                logger.info(f"Configuration: page_size={page_size}, max_workers={max_workers}, "
+                            f"max_retries={max_retries}, retry_delay={retry_delay}s")
+                logger.info("=" * 60)
+                
+                migrate_bucket(
+                    db_name=db_name,
+                    bucket_name=bucket_name,
+                    migrate_keep_structure=migrate_keep_structure,
+                    page_size=page_size,
+                    max_workers=max_workers,
+                    max_retries=max_retries,
+                    retry_delay=retry_delay
+                )
+    except Exception as e:
+        logger.error(f"Error migrating all buckets: {e}", exc_info=True)
+    finally:
+        gc.collect()
+
+def process_single(db_name:str, bucket_name: str, migrate_keep_structure: bool, 
+                   page:int, page_size:int, max_retries:int, retry_delay:int):
+    'migrate data with single thread'
+    process_page(
+        db_name=db_name, 
+        bucket_name=bucket_name, 
+        migrate_keep_structure=migrate_keep_structure,
+        page=page,
+        page_size=page_size,
+        max_retries=max_retries,
+        retry_delay=retry_delay
+    )
+        
+    
 if __name__ == "__main__":
     # Configuration
-    page_size = 1000  # Số records mỗi page
-    max_workers = 5  # Số threads xử lý song song
-    max_retries = 3  # Số lần retry tối đa khi timeout
-    retry_delay = 2  # Thời gian delay giữa các retry (giây)
-    
+    # db_name = "rms"
+    # bucket_name = "rms_events"
+    # page = 0
+    page_size = 1000  # Number of records per page
+    max_workers = 8  # Maximum number of threads for parallel processing
+    max_retries = 3  # Maximum number of retries when timeout
+    retry_delay = 2  # Delay between retries (seconds)
+    migrate_keep_structure = False # migrate RMS data. update to True when migrate original data
     start_time = time.time()
-    for db_name, bucket_names in DB_SETTING.items():
-        drop_collections(db_name)
-        for bucket_name in bucket_names:
-            # check and create index if not exists
-            create_index(bucket_name)
 
-            logger.info("=" * 60)
-            logger.info(f"Migrating bucket: {bucket_name.upper()}")
-            logger.info(f"Configuration: page_size={page_size}, max_workers={max_workers}, "
-                        f"max_retries={max_retries}, retry_delay={retry_delay}s")
-            logger.info("=" * 60)
-            
-            migrate_bucket(
-                db_name=db_name,
-                bucket_name=bucket_name,
-                page_size=page_size,
-                max_workers=max_workers,
-                max_retries=max_retries,
-                retry_delay=retry_delay
-            )
-            
+    migrate_all_buckets(
+        migrate_keep_structure=migrate_keep_structure, 
+        page_size=page_size, 
+        max_workers=max_workers, 
+        max_retries=max_retries, 
+        retry_delay=retry_delay
+    )
+    
+    # process_single(
+    #     db_name=db_name, 
+    #     bucket_name=bucket_name, 
+    #     migrate_keep_structure=migrate_keep_structure, 
+    #     page=0, 
+    #     page_size=page_size, 
+    #     max_retries=max_retries, 
+    #     retry_delay=retry_delay
+    # )
+         
     total_time = time.time() - start_time
     logger.info("=" * 60)
     logger.info(f"Migration completed in {total_time:.2f} seconds")

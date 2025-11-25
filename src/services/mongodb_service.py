@@ -1,3 +1,4 @@
+import gc
 import json
 import re
 from dal.mongodb_dal import MongoDBDataAccess
@@ -148,10 +149,7 @@ class MongoDBService:
                     
                     if processed_doc is not None:
                         document = processed_doc
-                        # Preserve _id from outer level if it exists
-                        if '_id' in doc:
-                            document['_id'] = doc['_id']
-                        # Also preserve any other top-level keys except collection_name
+                        #preserve any other top-level keys except collection_name
                         for key, value in doc.items():
                             if key != collection_name and key not in document:
                                 document[key] = value
@@ -171,6 +169,7 @@ class MongoDBService:
                 
                 # Handle id mapping if enabled
                 if self.mapping_id and isinstance(document, dict):
+                    document['_id'] = doc['id']
                     if 'id' in document and 'value' in document:
                         if isinstance(document['value'], dict):
                             inner_doc = document['value'].copy()
@@ -179,7 +178,7 @@ class MongoDBService:
                                 del inner_doc['id']
                             document = inner_doc
                     elif 'id' in document:
-                        document['_id'] = document['id']
+                        # document['_id'] = document['id']
                         del document['id']
                 
                 # Final check before appending
@@ -201,6 +200,9 @@ class MongoDBService:
         except Exception as e:
             logger.error(f"Error adding documents to MongoDB: {e}", exc_info=True)
             raise e
+        finally:
+            self.mongo_dal.close()
+            gc.collect()
 
     def drop_collections(self):
         try:
@@ -208,112 +210,123 @@ class MongoDBService:
         except Exception as e:
             logger.error(f"Error dropping collections from MongoDB: {e}", exc_info=True)
             raise e
+        finally:
+            self.mongo_dal.close()
+            gc.collect()
 
 
     def process_rms_data(self, bucket_name: str, data: list):
-        default_group_key = "Others"
-        group = {}
-        skipped_count = 0
-        
-        def convert_to_dict(value):
-            if isinstance(value, str):
-                try:
-                    # First try to parse directly
-                    processed_doc = json.loads(value)
-                    if not isinstance(processed_doc, dict):
-                        # If parsed result is not a dict, keep original structure
-                        return None
-                except (json.JSONDecodeError, ValueError) as e:
-                    # If direct parse fails, try to normalize the string first
-                    try:
-                        normalized_str = self._normalize_json_string(value)
-                        processed_doc = json.loads(normalized_str)
-                        if not isinstance(processed_doc, dict):
-                            return None
-                    except (json.JSONDecodeError, ValueError) as e2:
-                        logger.warning(f"Failed to parse JSON string for collection {bucket_name}: {e2}")
-                        return None
-                return processed_doc
-            elif isinstance(value, dict):
-                return value
-            else:
-                return None
-
-        for doc in data:
-            try:
-                if not isinstance(doc, dict):
-                    skipped_count += 1
-                    logger.warning(f"Skipping non-dict document in {bucket_name}: {type(doc)}")
-                    continue
-                    
-                _document = doc.copy()
-                rms_dict = convert_to_dict(_document.get(bucket_name))
-                
-                # Skip if rms_dict is None or not a dict
-                if not isinstance(rms_dict, dict):
-                    skipped_count += 1
-                    doc_id = _document.get('id', 'unknown')
-                    logger.warning(f"Skipping document with id '{doc_id}' in {bucket_name}: could not convert to dict")
-                    continue
-                
-                typekey = rms_dict.get('typekey') if isinstance(rms_dict, dict) else None
-                
-                group_key = typekey if typekey else default_group_key
-                if group_key not in group:
-                    group[group_key] = []
-                
-                # Ensure rms_dict is a dict before processing
-                if isinstance(rms_dict, dict):
-                    rms_dict = rms_dict.copy()  # Make a copy to avoid modifying original
-                    rms_dict['bucket_name'] = bucket_name
-                    rms_dict['id'] = f"{bucket_name[4:]}-{_document.get('id')}" # add bucket name there to avoid duplicate id
-                    if 'typekey' in rms_dict:
-                        del rms_dict['typekey']
-                        
-                if self.mapping_id and isinstance(rms_dict, dict):
-                    if 'id' in rms_dict and 'value' in rms_dict:
-                        if isinstance(rms_dict['value'], dict):
-                            inner_doc = rms_dict['value'].copy()
-                            inner_doc['_id'] = rms_dict['id']
-                            if 'id' in inner_doc:
-                                del inner_doc['id']
-                            rms_dict = inner_doc
-                    elif 'id' in rms_dict:
-                        rms_dict['_id'] = rms_dict['id']
-                        del rms_dict['id']
-                
-                # Only append if rms_dict is still a dict after processing
-                if isinstance(rms_dict, dict):
-                    group[group_key].append(rms_dict)
-                else:
-                    skipped_count += 1
-                    logger.warning(f"Skipping document after processing in {bucket_name}: result is not a dict")
-            except Exception as e:
-                skipped_count += 1
-                doc_id = doc.get('id', 'unknown') if isinstance(doc, dict) else 'unknown'
-                logger.error(f"Error processing document with id '{doc_id}' in {bucket_name}: {e}", exc_info=True)
-                continue
-        
-        if skipped_count > 0:
-            logger.warning(f"Skipped {skipped_count} invalid documents in {bucket_name}")
-        
-        # with(open(f'{bucket_name}_group.json', 'w')) as f:
-        #     json.dump(group, f, indent=2, ensure_ascii=False)
-
-        for group_key, group_value in group.items():
-            if group_value:  # Only process non-empty groups
-                # Filter out any None or non-dict values before inserting
-                valid_docs = [doc for doc in group_value if isinstance(doc, dict)]
-                if valid_docs:
-                    self.add_documents(group_key, valid_docs)
-                else:
-                    logger.warning(f"No valid documents to insert for group '{group_key}' in {bucket_name}")
-
-
-
-    def add_document(self, db_name: str, bucket_name: str, document: dict):
+        'process RMS data then insert into MongoDB'
         try:
-            self.mongo_dal.add_document(db_name, bucket_name, document)
+            default_group_key = "Others"
+            group = {}
+            skipped_count = 0
+            
+            def convert_to_dict(value):
+                if isinstance(value, str):
+                    try:
+                        # First try to parse directly
+                        processed_doc = json.loads(value)
+                        if not isinstance(processed_doc, dict):
+                            # If parsed result is not a dict, keep original structure
+                            return None
+                    except (json.JSONDecodeError, ValueError) as e:
+                        # If direct parse fails, try to normalize the string first
+                        try:
+                            normalized_str = self._normalize_json_string(value)
+                            processed_doc = json.loads(normalized_str)
+                            if not isinstance(processed_doc, dict):
+                                return None
+                        except (json.JSONDecodeError, ValueError) as e2:
+                            logger.warning(f"Failed to parse JSON string for collection {bucket_name}: {e2}")
+                            return None
+                    return processed_doc
+                elif isinstance(value, dict):
+                    return value
+                else:
+                    return None
+
+            for doc in data:
+                try:
+                    if not isinstance(doc, dict):
+                        skipped_count += 1
+                        logger.warning(f"Skipping non-dict document in {bucket_name}: {type(doc)}")
+                        continue
+                        
+                    _document = doc.copy()
+                    rms_dict = convert_to_dict(_document.get(bucket_name))
+                    
+                    # Skip if rms_dict is None or not a dict
+                    if not isinstance(rms_dict, dict):
+                        skipped_count += 1
+                        doc_id = _document.get('id', 'unknown')
+                        logger.warning(f"Skipping document with id '{doc_id}' in {bucket_name}: could not convert to dict")
+                        continue
+                    
+                    typekey = rms_dict.get('typekey') if isinstance(rms_dict, dict) else None
+                    
+                    group_key = typekey if typekey else default_group_key
+                    if group_key not in group:
+                        group[group_key] = []
+                    
+                    # Ensure rms_dict is a dict before processing
+                    if isinstance(rms_dict, dict):
+                        rms_dict = rms_dict.copy()  # Make a copy to avoid modifying original
+                        rms_dict['bucket_name'] = bucket_name
+                        rms_dict['id'] = f"{bucket_name[4:]}-{_document.get('id')}" # add bucket name there to avoid duplicate id
+                        if 'typekey' in rms_dict:
+                            del rms_dict['typekey']
+                            
+                    if self.mapping_id and isinstance(rms_dict, dict):
+                        if 'id' in rms_dict and 'value' in rms_dict:
+                            if isinstance(rms_dict['value'], dict):
+                                inner_doc = rms_dict['value'].copy()
+                                inner_doc['_id'] = rms_dict['id']
+                                if 'id' in inner_doc:
+                                    del inner_doc['id']
+                                rms_dict = inner_doc
+                        elif 'id' in rms_dict:
+                            rms_dict['_id'] = rms_dict['id']
+                            del rms_dict['id']
+                    
+                    # Only append if rms_dict is still a dict after processing
+                    if isinstance(rms_dict, dict):
+                        group[group_key].append(rms_dict)
+                    else:
+                        skipped_count += 1
+                        logger.warning(f"Skipping document after processing in {bucket_name}: result is not a dict")
+                except Exception as e:
+                    skipped_count += 1
+                    doc_id = doc.get('id', 'unknown') if isinstance(doc, dict) else 'unknown'
+                    logger.error(f"Error processing document with id '{doc_id}' in {bucket_name}: {e}", exc_info=True)
+                    continue
+            
+            if skipped_count > 0:
+                logger.warning(f"Skipped {skipped_count} invalid documents in {bucket_name}")
+            
+            # with(open(f'{bucket_name}_group.json', 'w')) as f:
+            #     json.dump(group, f, indent=2, ensure_ascii=False)
+
+            # Insert data into MongoDB
+            for group_key, group_value in group.items():
+                if group_value:  # Only process non-empty groups
+                    # Filter out any None or non-dict values before inserting
+                    valid_docs = [doc for doc in group_value if isinstance(doc, dict)]
+                    if valid_docs:
+                        self.mongo_dal.add_documents(group_key, valid_docs)
+                    else:
+                        logger.warning(f"No valid documents to insert for group '{group_key}' in {bucket_name}")
+
         except Exception as e:
-            logger.error(f"{bucket_name.upper()}: Error adding document to MongoDB: {e}", exc_info=True)
+            logger.error(f"Error processing RMS data in {bucket_name}: {e}", exc_info=True)
             raise e
+        finally:
+            self.mongo_dal.close()
+            gc.collect()
+
+    # def add_document(self, db_name: str, bucket_name: str, document: dict):
+    #     try:
+    #         self.mongo_dal.add_document(db_name, bucket_name, document)
+    #     except Exception as e:
+    #         logger.error(f"{bucket_name.upper()}: Error adding document to MongoDB: {e}", exc_info=True)
+    #         raise e
