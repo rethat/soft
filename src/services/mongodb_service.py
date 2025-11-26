@@ -215,7 +215,7 @@ class MongoDBService:
             gc.collect()
 
 
-    def process_rms_data(self, bucket_name: str, data: list):
+    def process_rms_data(self, bucket_name: str, page: int, data: list):
         'process RMS data then insert into MongoDB'
         try:
             default_group_key = "Others"
@@ -273,9 +273,9 @@ class MongoDBService:
                     if isinstance(rms_dict, dict):
                         rms_dict = rms_dict.copy()  # Make a copy to avoid modifying original
                         rms_dict['bucket_name'] = bucket_name
-                        rms_dict['id'] = f"{bucket_name[4:]}-{_document.get('id')}" # add bucket name there to avoid duplicate id
-                            
+
                     if self.mapping_id and isinstance(rms_dict, dict):
+                        rms_dict['_id'] = doc['id'] # add bucket name there to avoid duplicate id
                         if 'id' in rms_dict and 'value' in rms_dict:
                             if isinstance(rms_dict['value'], dict):
                                 inner_doc = rms_dict['value'].copy()
@@ -283,9 +283,9 @@ class MongoDBService:
                                 if 'id' in inner_doc:
                                     del inner_doc['id']
                                 rms_dict = inner_doc
-                        elif 'id' in rms_dict:
-                            rms_dict['_id'] = rms_dict['id']
-                            del rms_dict['id']
+                        # elif 'id' in rms_dict:
+                        #     rms_dict['_id'] = rms_dict['id']
+                        #     del rms_dict['id']
                     
                     # Only append if rms_dict is still a dict after processing
                     if isinstance(rms_dict, dict):
@@ -311,7 +311,13 @@ class MongoDBService:
                     # Filter out any None or non-dict values before inserting
                     valid_docs = [doc for doc in group_value if isinstance(doc, dict)]
                     if valid_docs:
-                        self.mongo_dal.add_documents(group_key, valid_docs)
+                        try:
+                            self.mongo_dal.add_documents(group_key, valid_docs)
+                        except Exception as e:
+                            logger.error(f"ERROR_INSERT_MONGODB: {bucket_name.upper()}[{page}] - '{group_key}' | Error:{e}", exc_info=True)
+                            with open(f'{bucket_name}_{page}_error_{group_key}.json', 'w', encoding='utf-8') as f:
+                                json.dump(valid_docs, f, indent=2, ensure_ascii=False)
+                            continue
                     else:
                         logger.warning(f"No valid documents to insert for group '{group_key}' in {bucket_name}")
 

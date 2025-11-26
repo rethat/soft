@@ -60,7 +60,7 @@ def process_page(db_name: str, bucket_name: str, migrate_keep_structure: bool, p
         if migrate_keep_structure:
             mongo_service.add_documents(bucket_name, page_data)
         else:
-            mongo_service.process_rms_data(bucket_name, page_data)
+            mongo_service.process_rms_data(bucket_name, page, page_data)
         
         with fetch_lock:
             logger.info(f"Page: {page}x size:{page*page_size}): Successfully processed {len(page_data)} records")
@@ -142,14 +142,14 @@ def migrate_bucket(db_name: str, bucket_name: str, migrate_keep_structure: bool,
         del cb_service
         gc.collect()
 
-def create_index(bucket_name: str):
+def create_index(bucket_name: str, force: bool = False):
     """
     Create primary index on the bucket.
     Wait until index is online before migrating data
     """
     try:
         couchbase_service = CouchbaseService(CouchbaseDataAccess(CouchbaseConfig()))
-        couchbase_service.create_primary_index(bucket_name)
+        couchbase_service.create_primary_index(bucket_name, force=force)
         _, state = couchbase_service.check_index_status(bucket_name)
         while not state:
             time.sleep(1)
@@ -180,7 +180,7 @@ def migrate_all_buckets(migrate_keep_structure: bool,
             drop_collections(db_name)
             for bucket_name in bucket_names:
                 # check and create index if not exists
-                create_index(bucket_name)
+                create_index(bucket_name, force=True)
 
                 logger.info("=" * 60)
                 logger.info(f"Migrating bucket: {bucket_name.upper()}")

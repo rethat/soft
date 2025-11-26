@@ -31,7 +31,6 @@ class CouchbaseDataAccess:
             timeout: Timeout for cluster connection (default: 30 seconds)
         """
         try:
-            logger.info(f"Attempting to connect to Couchbase cluster at {self.config.host} (timeout: {timeout.total_seconds()}s)")
             authenticator = PasswordAuthenticator(self.config.user, self.config.password)
             
             # Configure timeout options
@@ -49,10 +48,7 @@ class CouchbaseDataAccess:
             self.cluster = Cluster(f"couchbase://{self.config.host}", cluster_options)
             
             # Wait for the cluster to be ready
-            logger.debug(f"Waiting for cluster to be ready (timeout: {timeout.total_seconds()}s)...")
             self.cluster.wait_until_ready(timeout=timeout)
-            
-            logger.info(f"Successfully connected to Couchbase cluster at {self.config.host}")
             return self.cluster
         except CouchbaseException as e:
             error_msg = str(e)
@@ -325,6 +321,9 @@ class CouchbaseDataAccess:
         Drop primary index on the bucket.
         """
         try:
+            exists, _ = self.check_index_status(bucket_name)
+            if not exists:
+                return
             cluster = self.connect()
             query = f'DROP PRIMARY INDEX ON `{bucket_name}`;'
             query_options = QueryOptions(client_context_id=str(uuid.uuid4()))
