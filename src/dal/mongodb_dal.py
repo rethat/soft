@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import MongoDBConfig
 from pymongo import MongoClient
 from pymongo.database import Database
-from pymongo.errors import ConnectionFailure, PyMongoError
+from pymongo.errors import ConnectionFailure, PyMongoError, ServerSelectionTimeoutError
 
 from logger_config import get_logger
 logger = get_logger(__name__)
@@ -22,12 +22,29 @@ class MongoDBDataAccess:
 
     def connect(self):
         try:
+            _connection_timeout = 30000
+            _socket_timeout = 60000
             connection_string = self.config.connection_string
             if self.config.tls == "true":
                 import certifi as cert
-                self.client = MongoClient(connection_string, tls=True, tlsCAFile= cert.where(), serverSelectionTimeoutMS=30000, maxIdleTimeMS=120000)
+                self.client = MongoClient(
+                    connection_string, 
+                    tls=True, 
+                    tlsCAFile= cert.where(), 
+                    serverSelectionTimeoutMS=30000, 
+                    maxIdleTimeMS=120000,
+                    tlsallowinvalidcertificates=False,
+                    connectionTimeoutMS=_connection_timeout,
+                    socketTimeoutMS=_socket_timeout
+                )
             else:
-                self.client = MongoClient(connection_string, serverSelectionTimeoutMS=30000, maxIdleTimeMS=120000)
+                self.client = MongoClient(
+                    connection_string, 
+                    serverSelectionTimeoutMS=30000, 
+                    maxIdleTimeMS=120000,
+                    connectionTimeoutMS=_connection_timeout,
+                    socketTimeoutMS=_socket_timeout
+                )
             self.database = self.client[self.config.database]
             return self.client
         except ConnectionFailure as e:
@@ -59,19 +76,44 @@ class MongoDBDataAccess:
             self.close()
             gc.collect()
 
-    def add_documents(self, collection_name: str, documents: list):
-        try:
-            self.connect()
-            self.database[collection_name].insert_many(documents)
-        except PyMongoError as e:
-            logger.error(f"Error adding documents to MongoDB: {e}", exc_info=True)
-            raise e
-        except Exception as e:
-            logger.error(f"Unexpected error adding documents to MongoDB: {e}", exc_info=True)
-            raise e
-        finally:
-            self.close()
-            gc.collect()
+    def add_documents(self, collection_name: str, documents: list, max_retries: int = 5, retry_delay: int = 3):
+        import time
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                self.close() # close previous connection since retry
+                self.connect()
+                self.database[collection_name].insert_many(documents)
+                return
+            except (PyMongoError, ConnectionFailure, ServerSelectionTimeoutError) as e:
+                last_error = e
+                is_ssl_error = self._is_ssl_error(e)
+                if is_ssl_error:
+                    logger.warning(f"SSL/Connection error. Attempt {attempt + 1}/{max_retries})"
+                                   f"{collection_name}. Error: {e}")
+                else:
+                    logger.warning(f"MongoDB error on attempt {attempt + 1}/{max_retries}"
+                    f"Collection: {collection_name}. Error: {e}", exc_info=True)
+                if attempt < max_retries - 1:
+                    delay = retry_delay * (2**attempt)
+                    logger.info(f"Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"=" * 90)
+                    logger.error(
+                        f"Failed to insert documents after {max_retries} attempts for {collection_name}. Error: {last_error}",
+                        exc_info=True
+                    )
+                    logger.error(f"=" * 90)
+                    raise e
+            except Exception as e:
+                last_error = e
+                logger.error(f"Unexpected error adding documents to MongoDB: {e}", exc_info=True)
+                raise e
+            finally:
+                if attempt < max_retries - 1 or last_error:
+                    self.close()
+                gc.collect()
 
     def drop_collections(self):
         try:
@@ -90,3 +132,15 @@ class MongoDBDataAccess:
         finally:
             self.close()
             gc.collect()
+
+    def _is_ssl_error(self, error):
+        error_str = str(error).lower()
+        ssl_indicators = [
+            "ssl",
+            "eof occurred in violation of protocol",
+            "connection reset",
+            "broken pipe",
+            "connection aborted",
+            "time out"
+        ]
+        return any(indicator in error_str for indicator in ssl_indicators)

@@ -312,7 +312,10 @@ class MongoDBService:
                     valid_docs = [doc for doc in group_value if isinstance(doc, dict)]
                     if valid_docs:
                         try:
-                            self.mongo_dal.add_documents(group_key, valid_docs)
+                            BATCH_SIZE = 500
+                            for i in range(0, len(valid_docs), BATCH_SIZE):
+                                batch = valid_docs[i:i+BATCH_SIZE]
+                                self.mongo_dal.add_documents(group_key, batch, max_retries=5, retry_delay=3)
                         except Exception as e:
                             logger.error(f"ERROR_INSERT_MONGODB: {bucket_name.upper()}[{page}] - '{group_key}' | Error:{e}", exc_info=True)
                             with open(f'{bucket_name}_{page}_error_{group_key}.json', 'w', encoding='utf-8') as f:
