@@ -1,4 +1,4 @@
-from multiprocessing.reduction import duplicate
+
 import os
 import sys
 import gc
@@ -23,8 +23,6 @@ class MongoDBDataAccess:
 
     def connect(self):
         try:
-            _connection_timeout = 30000
-            _socket_timeout = 60000
             connection_string = self.config.connection_string
             if self.config.tls == "true":
                 import certifi as cert
@@ -33,18 +31,13 @@ class MongoDBDataAccess:
                     tls=True, 
                     tlsCAFile= cert.where(), 
                     serverSelectionTimeoutMS=30000, 
-                    maxIdleTimeMS=120000,
-                    tlsallowinvalidcertificates=False,
-                    connectionTimeoutMS=_connection_timeout,
-                    socketTimeoutMS=_socket_timeout
+                    maxIdleTimeMS=120000
                 )
             else:
                 self.client = MongoClient(
                     connection_string, 
                     serverSelectionTimeoutMS=30000, 
-                    maxIdleTimeMS=120000,
-                    connectionTimeoutMS=_connection_timeout,
-                    socketTimeoutMS=_socket_timeout
+                    maxIdleTimeMS=120000
                 )
             self.database = self.client[self.config.database]
             return self.client

@@ -17,7 +17,7 @@ from services.couchbase_service import CouchbaseService
 from services.mongodb_service import MongoDBService
 
 # Setup logging
-setup_logging(log_dir='logs', log_level=logging.DEBUG)
+setup_logging(log_dir='logs', log_level=logging.INFO)
 logger = get_logger(__name__)
 
 # Thread-safe lock for logging

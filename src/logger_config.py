@@ -99,7 +99,7 @@ class SizeTimedRotatingFileHandler(TimedRotatingFileHandler):
                 except OSError:
                     pass
 
-def setup_logging(log_dir='logs', log_level=logging.DEBUG):
+def setup_logging(log_dir='logs', log_level=logging.INFO):
     """
     Setup logging configuration with all levels, daily rotation, and 10MB size limit
     
