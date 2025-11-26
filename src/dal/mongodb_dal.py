@@ -1,3 +1,4 @@
+from multiprocessing.reduction import duplicate
 import os
 import sys
 import gc
@@ -8,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import MongoDBConfig
 from pymongo import MongoClient
 from pymongo.database import Database
-from pymongo.errors import ConnectionFailure, PyMongoError, ServerSelectionTimeoutError
+from pymongo.errors import BulkWriteError, ConnectionFailure, PyMongoError, ServerSelectionTimeoutError
 
 from logger_config import get_logger
 logger = get_logger(__name__)
@@ -83,8 +84,33 @@ class MongoDBDataAccess:
             try:
                 self.close() # close previous connection since retry
                 self.connect()
-                self.database[collection_name].insert_many(documents)
+                self.database[collection_name].insert_many(documents, ordered=False)
                 return
+            except BulkWriteError as bwe:
+                write_errors = bwe.details.get('writeErrors', [])
+                failed_indexes = {err['index'] for err in write_errors}
+                for i in failed_indexes:
+                    retry_doc = documents[i].copy()
+                    retry_doc.pop("_id", None)
+                    try:
+                        self.database[collection_name].insert_one(retry_doc)
+                    except PyMongoError as e:
+                        logger.error(f"FAILE_DOCUMENT_INSERT: {collection_name}|{documents[i]}|Error:{e}", exc_info=True)
+                        continue
+                
+                # duplicate_errors = [error for error in write_errors if error.get('code') == 11000]
+                # if duplicate_errors:
+                #     logger.warning(f"Duplicate key violation iggnored for {collection_name}. {len(duplicate_errors)} duplicates found.")
+                #     dup_indexes = {err['index'] for err in duplicate_errors}
+                #     dup_docs = [doc for idx, doc in enumerate(documents) if idx not in dup_indexes]
+                #     if not dup_docs:
+                #         return # all docs duplicated
+                #     logger.info(f"Retrying insert without duplicates ({len(dup_docs)} documents remaining)")
+                #     time.sleep(retry_delay)
+                #     continue
+                # else:
+                #     logger.error(f"Bulk write error for {collection_name}: {bwe.details}", exc_info=True)
+                #     raise bwe
             except (PyMongoError, ConnectionFailure, ServerSelectionTimeoutError) as e:
                 last_error = e
                 is_ssl_error = self._is_ssl_error(e)
