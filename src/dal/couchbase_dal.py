@@ -8,7 +8,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import CouchbaseConfig
 from couchbase.auth import PasswordAuthenticator
 from couchbase.cluster import Cluster
-from couchbase.exceptions import CouchbaseException
+from couchbase.exceptions import CouchbaseException, BucketNotFoundException, AmbiguousTimeoutException
+from couchbase.management.buckets import BucketManager, CreateBucketSettings, BucketType
 from couchbase.options import ClusterOptions, QueryOptions, ClusterTimeoutOptions
 from logger_config import get_logger
 import uuid
@@ -36,7 +37,7 @@ class CouchbaseDataAccess:
             # Configure timeout options
             timeout_opts = ClusterTimeoutOptions(
                 connect_timeout=timeout,
-                kv_timeout=timedelta(seconds=30),
+                kv_timeout=timedelta(seconds=60),  # Increased KV timeout for large documents
                 query_timeout=timedelta(seconds=120),
                 analytics_timeout=timedelta(seconds=120),
                 search_timeout=timedelta(seconds=30),
@@ -631,6 +632,309 @@ class CouchbaseDataAccess:
             raise e
         except Exception as e:
             logger.error(f"Unexpected error getting total count for bucket {bucket_name}: {e}", exc_info=True)
+            raise e
+        finally:
+            self.close()
+            gc.collect()
+    
+    def check_bucket_exists(self, bucket_name: str):
+        """
+        Check if a bucket exists in the Couchbase cluster.
+        
+        Args:
+            bucket_name: Name of the bucket to check
+        
+        Returns:
+            bool: True if bucket exists, False otherwise
+        """
+        try:
+            cluster = self.connect()
+            # Try to access the bucket - this will raise exception if bucket doesn't exist
+            bucket = cluster.bucket(bucket_name)
+            # Try to access default collection to verify bucket is accessible
+            collection = bucket.default_collection()
+            return True
+        except BucketNotFoundException:
+            return False
+        except CouchbaseException as e:
+            error_msg = str(e).lower()
+            if "bucket" in error_msg and "not found" in error_msg:
+                return False
+            # Other Couchbase exceptions might mean bucket exists but has other issues
+            logger.warning(f"Error checking bucket {bucket_name}: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"Unexpected error checking bucket {bucket_name}: {e}")
+            return False
+        finally:
+            self.close()
+            gc.collect()
+    
+    def create_bucket(self, bucket_name: str, ram_quota_mb: int = 100, 
+                     bucket_type: BucketType = BucketType.COUCHBASE, 
+                     flush_enabled: bool = False, wait_ready: bool = True,
+                     wait_timeout: int = 30):
+        """
+        Create a new bucket in Couchbase cluster.
+        
+        Args:
+            bucket_name: Name of the bucket to create
+            ram_quota_mb: RAM quota in MB (default: 100)
+            bucket_type: Type of bucket (default: BucketType.COUCHBASE)
+            flush_enabled: Enable flush capability (default: False)
+            wait_ready: Wait for bucket to be ready after creation (default: True)
+            wait_timeout: Timeout in seconds for waiting bucket to be ready (default: 30)
+        
+        Returns:
+            bool: True if bucket was created successfully, False otherwise
+        """
+        try:
+            cluster = self.connect()
+            bucket_manager = cluster.buckets()
+            
+            # Check if bucket already exists
+            try:
+                existing_buckets = bucket_manager.get_all_buckets()
+                bucket_names = [bucket.name for bucket in existing_buckets]
+                if bucket_name in bucket_names:
+                    logger.info(f"Bucket '{bucket_name}' already exists")
+                    return True
+            except Exception as e:
+                logger.warning(f"Could not check existing buckets: {e}, proceeding with creation")
+            
+            # Create bucket settings
+            bucket_settings = CreateBucketSettings(
+                name=bucket_name,
+                bucket_type=bucket_type,
+                ram_quota_mb=ram_quota_mb,
+                flush_enabled=flush_enabled
+            )
+            
+            # Create the bucket
+            logger.info(f"Creating bucket '{bucket_name}' with RAM quota: {ram_quota_mb}MB")
+            bucket_manager.create_bucket(bucket_settings)
+            logger.info(f"Bucket '{bucket_name}' creation initiated")
+            
+            # Wait for bucket to be ready
+            if wait_ready:
+                logger.info(f"Waiting for bucket '{bucket_name}' to be ready...")
+                elapsed = 0
+                while elapsed < wait_timeout:
+                    try:
+                        if self.check_bucket_exists(bucket_name):
+                            logger.info(f"Bucket '{bucket_name}' is now ready")
+                            return True
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                    elapsed += 1
+                    if elapsed % 5 == 0:
+                        logger.debug(f"Still waiting for bucket '{bucket_name}' to be ready... ({elapsed}s/{wait_timeout}s)")
+                
+                logger.warning(f"Timeout waiting for bucket '{bucket_name}' to be ready after {wait_timeout} seconds")
+                # Check one more time
+                if self.check_bucket_exists(bucket_name):
+                    logger.info(f"Bucket '{bucket_name}' is ready")
+                    return True
+                return False
+            
+            return True
+        except CouchbaseException as e:
+            error_msg = str(e).lower()
+            if "already exists" in error_msg or "duplicate" in error_msg:
+                logger.info(f"Bucket '{bucket_name}' already exists")
+                return True
+            logger.error(f"Error creating bucket '{bucket_name}': {e}", exc_info=True)
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error creating bucket '{bucket_name}': {e}", exc_info=True)
+            raise e
+        finally:
+            self.close()
+            gc.collect()
+    
+    def upsert_document(self, bucket_name: str, document_id: str, document: dict):
+        """
+        Upsert a single document into Couchbase bucket.
+        
+        Args:
+            bucket_name: Name of the bucket
+            document_id: Document key/id
+            document: Document data as dictionary
+        """
+        try:
+            cluster = self.connect()
+            if not self.bucket or self.bucket.name != bucket_name:
+                self.bucket = cluster.bucket(bucket_name)
+            
+            collection = self.bucket.default_collection()
+            collection.upsert(document_id, document)
+            logger.debug(f"Upserted document {document_id} into bucket {bucket_name}")
+        except CouchbaseException as e:
+            logger.error(f"Error upserting document {document_id} into bucket {bucket_name}: {e}", exc_info=True)
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error upserting document: {e}", exc_info=True)
+            raise e
+        finally:
+            self.close()
+            gc.collect()
+    
+    def upsert_documents(self, bucket_name: str, documents: list, batch_size: int = 100,
+                        max_retries: int = 3, retry_delay: int = 2):
+        """
+        Upsert multiple documents into Couchbase bucket.
+        
+        Args:
+            bucket_name: Name of the bucket
+            documents: List of dictionaries. Expected structure:
+                      - document["id"] is the document ID in bucket
+                      - document[bucket_name] is the document value
+                      - If value is not a dict, will try to convert it to dict
+            batch_size: Number of documents to process in each batch (default: 100)
+            max_retries: Maximum number of retries for failed upserts (default: 3)
+            retry_delay: Delay in seconds between retries (default: 2)
+        """
+        try:
+            cluster = self.connect()
+            if not self.bucket or self.bucket.name != bucket_name:
+                try:
+                    self.bucket = cluster.bucket(bucket_name)
+                except BucketNotFoundException:
+                    error_msg = (
+                        f"Bucket '{bucket_name}' not found in Couchbase cluster.\n"
+                        f"Please create the bucket first using Couchbase Admin UI or REST API.\n"
+                        f"To create bucket via REST API:\n"
+                        f"  curl -X POST http://{self.config.host}:8091/pools/default/buckets \\\n"
+                        f"    -u {self.config.user}:{self.config.password} \\\n"
+                        f"    -d name={bucket_name} \\\n"
+                        f"    -d bucketType=couchbase \\\n"
+                        f"    -d ramQuotaMB=100"
+                    )
+                    logger.error(error_msg)
+                    raise BucketNotFoundException(f"Bucket '{bucket_name}' not found. Please create it first.")
+            
+            collection = self.bucket.default_collection()
+            total_upserted = 0
+            skipped = 0
+            
+            for i in range(0, len(documents), batch_size):
+                batch = documents[i:i+batch_size]
+                for doc in batch:
+                    try:
+                        if not isinstance(doc, dict):
+                            skipped += 1
+                            logger.warning(f"Skipping non-dict document: {type(doc)}")
+                            continue
+                        
+                        # Extract document ID from document["id"]
+                        doc_id = doc.get('id')
+                        if not doc_id:
+                            # Fallback: try other common ID fields
+                            doc_id = doc.get('_id') or doc.get('key')
+                            if not doc_id:
+                                skipped += 1
+                                logger.warning(f"Skipping document without ID: {doc}")
+                                continue
+                        
+                        # Get document value from document[bucket_name]
+                        doc_value = doc.get(bucket_name)
+                        
+                        # If bucket_name field doesn't exist, try 'value' field as fallback
+                        if doc_value is None:
+                            doc_value = doc.get('value')
+                        
+                        # If still no value, use the entire doc (excluding id fields)
+                        if doc_value is None:
+                            doc_value = {k: v for k, v in doc.items() if k not in ['id', '_id', 'key']}
+                            if not doc_value:
+                                skipped += 1
+                                logger.warning(f"Skipping document with no value: {doc_id}")
+                                continue
+                        
+                        # Convert value to dict if needed
+                        if isinstance(doc_value, dict):
+                            doc_content = doc_value.copy()
+                        elif isinstance(doc_value, str):
+                            # Try to parse string as JSON
+                            try:
+                                doc_content = json.loads(doc_value)
+                                if not isinstance(doc_content, dict):
+                                    # If parsed result is not a dict, wrap it
+                                    doc_content = {"value": doc_content}
+                            except (json.JSONDecodeError, ValueError):
+                                # If not valid JSON, wrap the string as dict
+                                doc_content = {"value": doc_value}
+                        else:
+                            # For other types (list, number, etc.), wrap in dict
+                            doc_content = {"value": doc_value}
+                        
+                        # Ensure doc_content is a dict
+                        if not isinstance(doc_content, dict):
+                            doc_content = {"value": doc_content}
+                        
+                        # Upsert document with retry logic
+                        upsert_success = False
+                        last_error = None
+                        for attempt in range(max_retries):
+                            try:
+                                collection.upsert(doc_id, doc_content)
+                                total_upserted += 1
+                                upsert_success = True
+                                break
+                            except (AmbiguousTimeoutException, CouchbaseException) as e:
+                                last_error = e
+                                if attempt < max_retries - 1:
+                                    wait_time = retry_delay * (attempt + 1)  # Exponential backoff
+                                    logger.warning(
+                                        f"Timeout/Error upserting document '{doc_id}' "
+                                        f"(attempt {attempt + 1}/{max_retries}). "
+                                        f"Retrying in {wait_time} seconds... Error: {type(e).__name__}"
+                                    )
+                                    time.sleep(wait_time)
+                                    # Reconnect if needed (timeout might indicate connection issue)
+                                    try:
+                                        if not self.bucket or self.bucket.name != bucket_name:
+                                            self.bucket = cluster.bucket(bucket_name)
+                                        collection = self.bucket.default_collection()
+                                    except Exception as reconnect_err:
+                                        logger.warning(f"Error reconnecting: {reconnect_err}")
+                                else:
+                                    # Last attempt failed
+                                    logger.error(
+                                        f"Failed to upsert document '{doc_id}' after {max_retries} attempts. "
+                                        f"Error: {type(e).__name__}: {e}"
+                                    )
+                            except Exception as e:
+                                # Non-retryable errors
+                                last_error = e
+                                logger.error(f"Non-retryable error upserting document '{doc_id}': {e}")
+                                break
+                        
+                        if not upsert_success:
+                            skipped += 1
+                            logger.error(
+                                f"Skipping document '{doc_id}' after {max_retries} failed attempts. "
+                                f"Last error: {last_error}"
+                            )
+                        
+                    except Exception as e:
+                        skipped += 1
+                        logger.error(f"Error processing document (ID: {doc.get('id', 'unknown')}): {e}", exc_info=True)
+                        continue
+                
+                logger.debug(f"Upserted batch: {total_upserted} documents, skipped: {skipped}")
+            
+            logger.info(f"Upserted {total_upserted} documents into bucket {bucket_name}, skipped {skipped}")
+            return total_upserted
+        except BucketNotFoundException as e:
+            logger.error(f"Bucket '{bucket_name}' not found. Please create the bucket first.", exc_info=True)
+            raise e
+        except CouchbaseException as e:
+            logger.error(f"Error upserting documents into bucket {bucket_name}: {e}", exc_info=True)
+            raise e
+        except Exception as e:
+            logger.error(f"Unexpected error upserting documents: {e}", exc_info=True)
             raise e
         finally:
             self.close()
