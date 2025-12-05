@@ -361,8 +361,8 @@ def import_json_to_buckets(buckets_config: dict, input_dir: str = "exports",
     
     return results
 
-BUCKET_LIST = ["rms_rating_model", "rms_view"]
-MECHOICE_BUCKET_LIST = ["mec_rating_model", "mec_view"]
+BUCKET_LIST = ["mechoice_journal", "mechoice_metadata", "mechoice_notification", "mechoice_report", "mechoice_star_award_journal", "mechoice_star_award_view", "mechoice_view", "mechoice_workflow_journal", "mechoice_workflow_view"]
+MECHOICE_BUCKET_LIST = ["mechoice_journal", "mechoice_metadata", "mechoice_notification", "mechoice_report", "mechoice_star_award_journal", "mechoice_star_award_view", "mechoice_view", "mechoice_workflow_journal", "mechoice_workflow_view"]
 
 if __name__ == "__main__":
     # mode = 'export' 

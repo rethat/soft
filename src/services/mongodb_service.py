@@ -331,6 +331,398 @@ class MongoDBService:
             self.mongo_dal.close()
             gc.collect()
 
+    def _convert_doc_value(self, doc_value):
+        """
+        Convert doc_value from string to dict if needed.
+        
+        Args:
+            doc_value: Value to convert (can be str, dict, or other)
+            
+        Returns:
+            dict or None: Converted dict or None if conversion failed
+        """
+        if isinstance(doc_value, dict):
+            return doc_value
+        elif isinstance(doc_value, str):
+            try:
+                # First try to parse directly
+                processed_doc = json.loads(doc_value)
+                if isinstance(processed_doc, dict):
+                    return processed_doc
+            except (json.JSONDecodeError, ValueError):
+                # If direct parse fails, try to normalize the string first
+                try:
+                    normalized_str = self._normalize_json_string(doc_value)
+                    processed_doc = json.loads(normalized_str)
+                    if isinstance(processed_doc, dict):
+                        return processed_doc
+                except (json.JSONDecodeError, ValueError):
+                    return None
+        return None
+
+    def _check_duplicates_batch(self, collection_name: str, doc_ids: list):
+        """
+        Check for duplicate documents in batch using $in operator.
+        Much more efficient than checking one by one.
+        
+        Args:
+            collection_name: Name of the collection
+            doc_ids: List of document _id values to check
+            
+        Returns:
+            set: Set of _id values that already exist in the collection
+        """
+        if not doc_ids:
+            return set()
+        
+        try:
+            self.mongo_dal.connect()
+            # Query all _id values at once using $in operator
+            existing_docs = self.mongo_dal.database[collection_name].find(
+                {"_id": {"$in": doc_ids}},
+                {"_id": 1}  # Only return _id field
+            )
+            existing_ids = {doc["_id"] for doc in existing_docs}
+            return existing_ids
+        except Exception as e:
+            logger.error(f"Error checking duplicates in collection {collection_name}: {e}", exc_info=True)
+            return set()
+        finally:
+            self.mongo_dal.close()
+            gc.collect()
+
+    def process_mechoice_keep_structure(self, bucket_name: str, data: list, batch_size: int = 500):
+        """
+        Process documents with keep_structure strategy:
+        - Giữ nguyên cấu trúc bucket
+        - _id mapping với bucket["id"]
+        - value bằng bucket[bucket_name]
+        - Thêm field bucket_name
+        - Collection = bucket_name
+        
+        Args:
+            bucket_name: Name of the bucket
+            data: List of documents from Couchbase
+            batch_size: Batch size for bulk insert (default: 500)
+        """
+        try:
+            collection_name = bucket_name
+            processed_docs = []
+            skipped_count = 0
+            
+            for doc in data:
+                try:
+                    if not isinstance(doc, dict):
+                        skipped_count += 1
+                        continue
+                    
+                    doc_id = doc.get('id')
+                    if not doc_id:
+                        skipped_count += 1
+                        logger.warning(f"Document missing 'id' field in {bucket_name}")
+                        continue
+                    
+                    # Lấy value từ bucket[bucket_name]
+                    doc_value = doc.get(bucket_name)
+                    if doc_value is None:
+                        skipped_count += 1
+                        logger.warning(f"Document missing '{bucket_name}' field, doc_id: {doc_id}")
+                        continue
+                    
+                    # Convert value to dict
+                    doc_value = self._convert_doc_value(doc_value)
+                    if not isinstance(doc_value, dict):
+                        skipped_count += 1
+                        logger.warning(f"Document value is not a dict for doc_id: {doc_id}")
+                        continue
+                    
+                    # Tạo document mới với _id và thêm bucket_name
+                    final_doc = doc_value.copy()
+                    final_doc['_id'] = doc_id
+                    final_doc['bucket_name'] = bucket_name
+                    processed_docs.append(final_doc)
+                    
+                except Exception as e:
+                    skipped_count += 1
+                    doc_id = doc.get('id', 'unknown') if isinstance(doc, dict) else 'unknown'
+                    logger.error(f"Error processing document with id '{doc_id}' in {bucket_name}: {e}", exc_info=True)
+                    continue
+            
+            if not processed_docs:
+                logger.warning(f"No valid documents to insert for {bucket_name}")
+                return
+            
+            # Batch check duplicates
+            doc_ids = [doc['_id'] for doc in processed_docs]
+            existing_ids = self._check_duplicates_batch(collection_name, doc_ids)
+            
+            # Filter out duplicates
+            unique_docs = [doc for doc in processed_docs if doc['_id'] not in existing_ids]
+            duplicate_count = len(processed_docs) - len(unique_docs)
+            
+            if duplicate_count > 0:
+                logger.info(f"[{bucket_name.upper()}]: Found {duplicate_count} duplicate documents in {collection_name}, skipping")
+            
+            # Insert in batches
+            if unique_docs:
+                for i in range(0, len(unique_docs), batch_size):
+                    batch = unique_docs[i:i+batch_size]
+                    try:
+                        self.mongo_dal.add_documents(collection_name, batch, max_retries=5, retry_delay=3)
+                        logger.debug(f"Inserted batch {i//batch_size + 1} ({len(batch)} documents) into {collection_name}")
+                    except Exception as e:
+                        logger.error(f"Error inserting batch into {collection_name}: {e}", exc_info=True)
+                        raise e
+                
+                logger.info(f"Successfully processed {len(unique_docs)} documents for {bucket_name} (skipped {skipped_count + duplicate_count} documents)")
+            else:
+                logger.warning(f"All documents are duplicates for {bucket_name}")
+                
+        except Exception as e:
+            logger.error(f"Error processing keep_structure data for {bucket_name}: {e}", exc_info=True)
+            raise e
+        finally:
+            self.mongo_dal.close()
+            gc.collect()
+
+    def process_mechoice_restructure(self, bucket_name: str, data: list, batch_size: int = 500):
+        """
+        Process documents with restructure strategy:
+        - Collection name = doc_value['_type'] (giá trị của _type field)
+        - id = doc["id"]
+        - Thêm field bucket_name
+        
+        Args:
+            bucket_name: Name of the bucket
+            data: List of documents from Couchbase
+            batch_size: Batch size for bulk insert (default: 500)
+        """
+        try:
+            # Group documents by collection name (bucket_name + _type)
+            collection_groups = {}
+            skipped_count = 0
+            
+            for doc in data:
+                try:
+                    if not isinstance(doc, dict):
+                        skipped_count += 1
+                        continue
+                    
+                    doc_id = doc.get('id')
+                    if not doc_id:
+                        skipped_count += 1
+                        logger.warning(f"[{bucket_name.upper()}]: Document missing 'id'")
+                        continue
+                    
+                    # Lấy value từ bucket[bucket_name]
+                    doc_value = doc.get(bucket_name)
+                    if doc_value is None:
+                        skipped_count += 1
+                        logger.warning(f"[{bucket_name.upper()}]: Document missing '{bucket_name}' field, doc_id: {doc_id}")
+                        continue
+                    
+                    # Convert value to dict
+                    doc_value = self._convert_doc_value(doc_value)
+                    if not isinstance(doc_value, dict):
+                        skipped_count += 1
+                        logger.warning(f"[{bucket_name.upper()}]: Document value is not a dict for doc_id: {doc_id}")
+                        continue
+                    
+                    # Lấy _type từ doc_value
+                    doc_type = doc_value.get('_type')
+                    if not doc_type:
+                        skipped_count += 1
+                        logger.warning(f"[{bucket_name.upper()}]: Document missing '_type' , doc_id: {doc_id}")
+                        continue
+                    
+                    # Tạo collection name: giá trị của _type (không thêm bucket_name prefix)
+                    collection_name = doc_type
+                    
+                    # Tạo document mới với _id và thêm bucket_name
+                    final_doc = doc_value.copy()
+                    final_doc['_id'] = doc_id
+                    final_doc['bucket_name'] = bucket_name
+                    
+                    if collection_name not in collection_groups:
+                        collection_groups[collection_name] = []
+                    collection_groups[collection_name].append(final_doc)
+                    
+                except Exception as e:
+                    skipped_count += 1
+                    doc_id = doc.get('id', 'unknown') if isinstance(doc, dict) else 'unknown'
+                    logger.error(f"Error processing document with id '{doc_id}' in {bucket_name}: {e}", exc_info=True)
+                    continue
+            
+            if not collection_groups:
+                logger.warning(f"No valid documents to insert for {bucket_name}")
+                return
+            
+            # Process each collection group
+            total_inserted = 0
+            total_duplicates = 0
+            
+            for collection_name, docs in collection_groups.items():
+                # Batch check duplicates
+                doc_ids = [doc['_id'] for doc in docs]
+                existing_ids = self._check_duplicates_batch(collection_name, doc_ids)
+                
+                # Filter out duplicates
+                unique_docs = [doc for doc in docs if doc['_id'] not in existing_ids]
+                duplicate_count = len(docs) - len(unique_docs)
+                total_duplicates += duplicate_count
+                
+                if duplicate_count > 0:
+                    logger.info(f"Found {duplicate_count} duplicate documents in {collection_name}, skipping")
+                
+                # Insert in batches
+                if unique_docs:
+                    for i in range(0, len(unique_docs), batch_size):
+                        batch = unique_docs[i:i+batch_size]
+                        try:
+                            self.mongo_dal.add_documents(collection_name, batch, max_retries=5, retry_delay=3)
+                            logger.debug(f"Inserted batch {i//batch_size + 1} ({len(batch)} documents) into {collection_name}")
+                        except Exception as e:
+                            logger.error(f"Error inserting batch into {collection_name}: {e}", exc_info=True)
+                            raise e
+                    
+                    total_inserted += len(unique_docs)
+                    logger.info(f"Successfully inserted {len(unique_docs)} documents into {collection_name}")
+                else:
+                    logger.warning(f"All documents are duplicates for {collection_name}")
+            
+            logger.info(f"Successfully processed {total_inserted} documents for {bucket_name} "
+                       f"(skipped {skipped_count + total_duplicates} documents)")
+                
+        except Exception as e:
+            logger.error(f"Error processing restructure data for {bucket_name}: {e}", exc_info=True)
+            raise e
+        finally:
+            self.mongo_dal.close()
+            gc.collect()
+
+    def process_mechoice_missing_type(self, bucket_name: str, data: list, batch_size: int = 500):
+        """
+        Process documents with missing_type strategy:
+        - Nếu doc[bucket_name] có _type thì collection_name = doc_value['_type']
+        - Nếu không có _type:
+          - Kiểm tra doc_value.get('count') -> collection_name = 'Count'
+          - Kiểm tra doc_value.get('counter') -> collection_name = 'Counter'
+          - Nếu không có cả hai -> collection_name = 'mechoice_metadata'
+        - Thêm field bucket_name
+        
+        Args:
+            bucket_name: Name of the bucket
+            data: List of documents from Couchbase
+            batch_size: Batch size for bulk insert (default: 500)
+        """
+        try:
+            # Group documents by collection name
+            collection_groups = {}
+            skipped_count = 0
+            
+            for doc in data:
+                try:
+                    if not isinstance(doc, dict):
+                        skipped_count += 1
+                        continue
+                    
+                    doc_id = doc.get('id')
+                    if not doc_id:
+                        skipped_count += 1
+                        logger.warning(f"Document missing 'id' field in {bucket_name}")
+                        continue
+                    
+                    # Lấy value từ bucket[bucket_name]
+                    doc_value = doc.get(bucket_name)
+                    if doc_value is None:
+                        skipped_count += 1
+                        logger.warning(f"Document missing '{bucket_name}' field, doc_id: {doc_id}")
+                        continue
+                    
+                    # Convert value to dict
+                    doc_value = self._convert_doc_value(doc_value)
+                    if not isinstance(doc_value, dict):
+                        skipped_count += 1
+                        logger.warning(f"Document value is not a dict for doc_id: {doc_id}")
+                        continue
+                    
+                    # Kiểm tra _type
+                    doc_type = doc_value.get('_type')
+                    if doc_type:
+                        # Có _type -> collection name = giá trị của _type
+                        collection_name = doc_type
+                    else:
+                        # Missing _type -> kiểm tra các field khác
+                        if doc_value.get('count') is not None:
+                            collection_name = 'Count'
+                        elif doc_value.get('counter') is not None:
+                            collection_name = 'Counter'
+                        else:
+                            # Không có cả count và counter -> dùng mechoice_metadata
+                            collection_name = 'mechoice_metadata'
+                    
+                    # Tạo document mới với _id và thêm bucket_name
+                    final_doc = doc_value.copy()
+                    final_doc['_id'] = doc_id
+                    final_doc['bucket_name'] = bucket_name
+                    
+                    if collection_name not in collection_groups:
+                        collection_groups[collection_name] = []
+                    collection_groups[collection_name].append(final_doc)
+                    
+                except Exception as e:
+                    skipped_count += 1
+                    doc_id = doc.get('id', 'unknown') if isinstance(doc, dict) else 'unknown'
+                    logger.error(f"Error processing document with id '{doc_id}' in {bucket_name}: {e}", exc_info=True)
+                    continue
+            
+            if not collection_groups:
+                logger.warning(f"No valid documents to insert for {bucket_name}")
+                return
+            
+            # Process each collection group
+            total_inserted = 0
+            total_duplicates = 0
+            
+            for collection_name, docs in collection_groups.items():
+                # Batch check duplicates
+                doc_ids = [doc['_id'] for doc in docs]
+                existing_ids = self._check_duplicates_batch(collection_name, doc_ids)
+                
+                # Filter out duplicates
+                unique_docs = [doc for doc in docs if doc['_id'] not in existing_ids]
+                duplicate_count = len(docs) - len(unique_docs)
+                total_duplicates += duplicate_count
+                
+                if duplicate_count > 0:
+                    logger.info(f"Found {duplicate_count} duplicate documents in {collection_name}, skipping")
+                
+                # Insert in batches
+                if unique_docs:
+                    for i in range(0, len(unique_docs), batch_size):
+                        batch = unique_docs[i:i+batch_size]
+                        try:
+                            self.mongo_dal.add_documents(collection_name, batch, max_retries=5, retry_delay=3)
+                            logger.debug(f"Inserted batch {i//batch_size + 1} ({len(batch)} documents) into {collection_name}")
+                        except Exception as e:
+                            logger.error(f"Error inserting batch into {collection_name}: {e}", exc_info=True)
+                            raise e
+                    
+                    total_inserted += len(unique_docs)
+                    logger.info(f"Successfully inserted {len(unique_docs)} documents into {collection_name}")
+                else:
+                    logger.warning(f"All documents are duplicates for {collection_name}")
+            
+            logger.info(f"Successfully processed {total_inserted} documents for {bucket_name} "
+                       f"(skipped {skipped_count + total_duplicates} documents)")
+                
+        except Exception as e:
+            logger.error(f"Error processing missing_type data for {bucket_name}: {e}", exc_info=True)
+            raise e
+        finally:
+            self.mongo_dal.close()
+            gc.collect()
+
     # def add_document(self, db_name: str, bucket_name: str, document: dict):
     #     try:
     #         self.mongo_dal.add_document(db_name, bucket_name, document)

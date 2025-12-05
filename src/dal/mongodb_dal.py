@@ -163,3 +163,28 @@ class MongoDBDataAccess:
             "time out"
         ]
         return any(indicator in error_str for indicator in ssl_indicators)
+
+    def document_exists(self, collection_name: str, document_id: str):
+        """
+        Check if a document with the given _id exists in the collection.
+        
+        Args:
+            collection_name: Name of the collection
+            document_id: Document _id to check
+            
+        Returns:
+            bool: True if document exists, False otherwise
+        """
+        try:
+            self.connect()
+            result = self.database[collection_name].find_one({"_id": document_id})
+            return result is not None
+        except PyMongoError as e:
+            logger.error(f"Error checking document existence in MongoDB: {e}", exc_info=True)
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error checking document existence: {e}", exc_info=True)
+            return False
+        finally:
+            self.close()
+            gc.collect()
