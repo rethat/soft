@@ -23,9 +23,9 @@ logger = get_logger(__name__)
 fetch_lock = Lock()
 
 MECHOICE_BUCKETS = {
-    "keep_structure" : ["mechoice_journal"],
+    "keep_structure" : ["mechoice_journal", "mechoice_workflow_journal", "mechoice_star_award_journal"],
     "restructure" : [ "mechoice_notification", "mechoice_report"],
-    "missing_type":  ["mechoice_metadata", "mechoice_view", "mechoice_workflow_journal", "mechoice_star_award_view", "mechoice_star_award_journal",  "mechoice_workflow_view" ]
+    "missing_type":  ["mechoice_metadata", "mechoice_view",  "mechoice_star_award_view", "mechoice_workflow_view" ]
 }
 
 
@@ -81,7 +81,8 @@ def process_page_mechoice(db_name: str, bucket_name: str, migration_type: str, p
                 return (page, 0)
             
             with fetch_lock:
-                logger.info(f"Page {page} (offset {page*page_size}): Successfully processed {len(page_data)} records for {bucket_name}")
+                if len(page_data) > 0:
+                    logger.info(f"Page {page} (offset {page*page_size}): Successfully processed {len(page_data)} records for {bucket_name}")
             
             return (page, success_count)
             
@@ -157,8 +158,8 @@ def migrate_bucket_mechoice(db_name: str, bucket_name: str, migration_type: str,
                     result_page, processed_count = future.result()
                     total_processed += processed_count
                     completed += 1
-                    if completed % 10 == 0:
-                        logger.info(f"Progress: {completed}/{total_pages} pages processed ({total_processed} records)")
+                    # if completed % 10 == 0:
+                    #     logger.info(f"Progress: {completed}/{total_pages} pages processed ({total_processed} records)")
                     if processed_count == 0:
                         failed_pages.append(result_page)
                 except Exception as e:

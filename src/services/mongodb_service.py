@@ -1,6 +1,7 @@
 import gc
 import json
 import re
+import uuid
 from dal.mongodb_dal import MongoDBDataAccess
 from logger_config import get_logger
 
@@ -358,6 +359,12 @@ class MongoDBService:
                         return processed_doc
                 except (json.JSONDecodeError, ValueError):
                     return None
+        elif isinstance(doc_value, int) or isinstance(doc_value, float):
+            return {"Counter": doc_value}
+        elif isinstance(doc_value, list):
+            # Wrap list so restructure flow can derive collection by _type (doc_id)
+            # and still access the original list to expand into documents.
+            return doc_value
         return None
 
     def _check_duplicates_batch(self, collection_name: str, doc_ids: list):
@@ -409,16 +416,22 @@ class MongoDBService:
             collection_name = bucket_name
             processed_docs = []
             skipped_count = 0
+            skipped_documents = []  # Track skipped documents with reasons
             
             for doc in data:
                 try:
                     if not isinstance(doc, dict):
                         skipped_count += 1
+                        doc_id = 'unknown'
+                        reason = f"Document is not a dict (type: {type(doc).__name__})"
+                        skipped_documents.append({"doc_id": doc_id, "reason": reason})
                         continue
                     
                     doc_id = doc.get('id')
                     if not doc_id:
                         skipped_count += 1
+                        reason = "Document missing 'id' field"
+                        skipped_documents.append({"doc_id": "unknown", "reason": reason})
                         logger.warning(f"Document missing 'id' field in {bucket_name}")
                         continue
                     
@@ -426,14 +439,48 @@ class MongoDBService:
                     doc_value = doc.get(bucket_name)
                     if doc_value is None:
                         skipped_count += 1
+                        reason = f"Document missing '{bucket_name}' field"
+                        skipped_documents.append({"doc_id": doc_id, "reason": reason})
                         logger.warning(f"Document missing '{bucket_name}' field, doc_id: {doc_id}")
                         continue
                     
-                    # Convert value to dict
+                    # Convert value to dict (or wrapped list) and expand if needed
                     doc_value = self._convert_doc_value(doc_value)
+                    if isinstance(doc_value, dict) and isinstance(doc_value.get("items"), list):
+                        # List was wrapped -> expand each item to its own document
+                        expanded_count = 0
+                        for item in doc_value["items"]:
+                            if not isinstance(item, dict):
+                                skipped_count += 1
+                                reason = f"List item is not a dict (type: {type(item).__name__})"
+                                skipped_documents.append({"doc_id": doc_id, "reason": reason})
+                                logger.warning(f"[{bucket_name.upper()}]: List item is not a dict for parent doc_id: {doc_id}")
+                                continue
+                            
+                            item_id = item.get('id')
+                            if not item_id:
+                                skipped_count += 1
+                                reason = "List item missing 'id' field"
+                                skipped_documents.append({"doc_id": doc_id, "reason": reason})
+                                logger.warning(f"[{bucket_name.upper()}]: List item missing 'id' for parent doc_id: {doc_id}")
+                                continue
+                            
+                            final_doc = item.copy()
+                            final_doc['_id'] = item_id
+                            final_doc['bucket_name'] = bucket_name
+                            processed_docs.append(final_doc)
+                            expanded_count += 1
+                        
+                        if expanded_count == 0:
+                            continue
+                        # already expanded; move to next doc
+                        continue
+                    
                     if not isinstance(doc_value, dict):
                         skipped_count += 1
-                        logger.warning(f"Document value is not a dict for doc_id: {doc_id}")
+                        reason = f"Document value is not a dict after conversion (type: {type(doc_value).__name__})"
+                        skipped_documents.append({"doc_id": doc_id, "reason": reason})
+                        logger.warning(f"[{bucket_name.upper()}]: Document value is not a dict for doc_id: {doc_id}")
                         continue
                     
                     # Tạo document mới với _id và thêm bucket_name
@@ -445,11 +492,17 @@ class MongoDBService:
                 except Exception as e:
                     skipped_count += 1
                     doc_id = doc.get('id', 'unknown') if isinstance(doc, dict) else 'unknown'
+                    reason = f"Exception during processing: {str(e)}"
+                    skipped_documents.append({"doc_id": doc_id, "reason": reason})
                     logger.error(f"Error processing document with id '{doc_id}' in {bucket_name}: {e}", exc_info=True)
                     continue
             
             if not processed_docs:
                 logger.warning(f"No valid documents to insert for {bucket_name}")
+                if skipped_documents:
+                    logger.info(f"Skipped documents details for {bucket_name}:")
+                    for skipped in skipped_documents:
+                        logger.info(f"  - doc_id: {skipped['doc_id']}, reason: {skipped['reason']}")
                 return
             
             # Batch check duplicates
@@ -459,9 +512,12 @@ class MongoDBService:
             # Filter out duplicates
             unique_docs = [doc for doc in processed_docs if doc['_id'] not in existing_ids]
             duplicate_count = len(processed_docs) - len(unique_docs)
+            duplicate_ids = [doc['_id'] for doc in processed_docs if doc['_id'] in existing_ids]
             
             if duplicate_count > 0:
                 logger.info(f"[{bucket_name.upper()}]: Found {duplicate_count} duplicate documents in {collection_name}, skipping")
+                for dup_id in duplicate_ids:
+                    skipped_documents.append({"doc_id": dup_id, "reason": "Duplicate document (already exists in collection)"})
             
             # Insert in batches
             if unique_docs:
@@ -469,12 +525,26 @@ class MongoDBService:
                     batch = unique_docs[i:i+batch_size]
                     try:
                         self.mongo_dal.add_documents(collection_name, batch, max_retries=5, retry_delay=3)
-                        logger.debug(f"Inserted batch {i//batch_size + 1} ({len(batch)} documents) into {collection_name}")
+                        # logger.debug(f"Inserted batch {i//batch_size + 1} ({len(batch)} documents) into {collection_name}")
                     except Exception as e:
                         logger.error(f"Error inserting batch into {collection_name}: {e}", exc_info=True)
                         raise e
-                
-                logger.info(f"Successfully processed {len(unique_docs)} documents for {bucket_name} (skipped {skipped_count + duplicate_count} documents)")
+                if skipped_count > 0:
+                    logger.info(f"Successfully processed {len(unique_docs)} documents for {bucket_name} (skipped {skipped_count} documents)")
+                if skipped_documents:
+                    logger.info(f"Skipped documents details for {bucket_name}:")
+                    # Group by reason for better readability
+                    reason_groups = {}
+                    for skipped in skipped_documents:
+                        reason = skipped['reason']
+                        if reason not in reason_groups:
+                            reason_groups[reason] = []
+                        reason_groups[reason].append(skipped['doc_id'])
+                    
+                    for reason, doc_ids_list in reason_groups.items():
+                        logger.info(f"  - Reason: {reason}")
+                        logger.info(f"    Document IDs ({len(doc_ids_list)}): {', '.join(str(did) for did in doc_ids_list[:10])}" + 
+                                  (f" ... and {len(doc_ids_list) - 10} more" if len(doc_ids_list) > 10 else ""))
             else:
                 logger.warning(f"All documents are duplicates for {bucket_name}")
                 
@@ -642,9 +712,32 @@ class MongoDBService:
                     # Convert value to dict
                     doc_value = self._convert_doc_value(doc_value)
                     if not isinstance(doc_value, dict):
-                        skipped_count += 1
-                        logger.warning(f"Document value is not a dict for doc_id: {doc_id}")
-                        continue
+                        if isinstance(doc_value, list):
+                            # When bucket value is a list, fan out each item into its own collection
+                            for item in doc_value:
+                                if not isinstance(item, dict):
+                                    skipped_count += 1
+                                    logger.warning(f"List item is not a dict for doc_id: {doc_id}")
+                                    continue
+
+                                item_id = item.get('id') or str(uuid.uuid4())
+                                final_item = item.copy()
+                                final_item['_type'] = doc_id
+                                final_item['_id'] = item_id
+                                final_item['bucket_name'] = bucket_name
+                                if "id" in final_item:
+                                    del final_item['id']
+
+                                collection_name = final_item['_type']
+                                if collection_name not in collection_groups:
+                                    collection_groups[collection_name] = []
+                                collection_groups[collection_name].append(final_item)
+                            # list items handled; move to next document
+                            continue
+                        else:
+                            skipped_count += 1
+                            logger.warning(f"Document value is not a dict for doc_id: {doc_id}")
+                            continue
                     
                     # Kiểm tra _type
                     doc_type = doc_value.get('_type')
