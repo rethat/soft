@@ -79,7 +79,7 @@ class CouchbaseDataAccess:
             self.cluster = None
             self.bucket = None
             logger.info("Closing Couchbase connection")
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
     
     def get_data(self, query: str, debug: bool = False, offset: int = None, limit: int = None):
         """
@@ -185,7 +185,7 @@ class CouchbaseDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
 
     def get_data_by_keys(self, bucket_name: str, keys: list):
         """
@@ -220,7 +220,7 @@ class CouchbaseDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
 
     def get_all_keys(self, bucket_name: str, limit: int = None):
         """
@@ -245,7 +245,7 @@ class CouchbaseDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
     
     def get_data_from_bucket(self, bucket_name: str, limit: int = 100):
         """
@@ -315,7 +315,7 @@ class CouchbaseDataAccess:
             return (False, False)
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
     
     def drop_primary_index(self, bucket_name: str):
         """
@@ -335,7 +335,7 @@ class CouchbaseDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
             
     
     def create_primary_index(self, bucket_name: str):
@@ -357,7 +357,7 @@ class CouchbaseDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
 
     def build_primary_index(self, bucket_name: str):
         """
@@ -374,7 +374,7 @@ class CouchbaseDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
 
     def get_data_as_json(self, query: str = None, bucket_name: str = None, limit: int = 100, keys: list = None):
         """
@@ -635,7 +635,7 @@ class CouchbaseDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
     
     def check_bucket_exists(self, bucket_name: str):
         """
@@ -668,7 +668,7 @@ class CouchbaseDataAccess:
             return False
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
     
     def create_bucket(self, bucket_name: str, ram_quota_mb: int = 100, 
                      bucket_type: BucketType = BucketType.COUCHBASE, 
@@ -751,7 +751,7 @@ class CouchbaseDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
     
     def upsert_document(self, bucket_name: str, document_id: str, document: dict):
         """
@@ -778,7 +778,7 @@ class CouchbaseDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
     
     def upsert_documents(self, bucket_name: str, documents: list, batch_size: int = 100,
                         max_retries: int = 3, retry_delay: int = 2):
@@ -938,4 +938,4 @@ class CouchbaseDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang

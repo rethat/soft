@@ -100,7 +100,7 @@ def process_page_mechoice(db_name: str, bucket_name: str, migration_type: str, p
             cb_service.cb_dal.close()
         if mongo_service:
             mongo_service.mongo_dal.close()
-        gc.collect()
+        # Removed gc.collect() to prevent debugger hang
 
 
 def migrate_bucket_mechoice(db_name: str, bucket_name: str, migration_type: str,
@@ -175,7 +175,7 @@ def migrate_bucket_mechoice(db_name: str, bucket_name: str, migration_type: str,
     finally:
         if cb_service:
             cb_service.cb_dal.close()
-        gc.collect()
+        # Removed gc.collect() to prevent debugger hang
 
 
 def create_index_mechoice(bucket_name: str, force: bool = False):
@@ -195,7 +195,8 @@ def create_index_mechoice(bucket_name: str, force: bool = False):
     except Exception as e:
         logger.error(f"Error creating primary index for bucket {bucket_name}: {e}", exc_info=True)
     finally:
-        gc.collect()
+        # Removed gc.collect() to prevent debugger hang
+        pass
 
 
 def migrate_mechoice_data(db_name: str = "mechoice", page_size: int = 1000, max_workers: int = 8,
@@ -249,7 +250,8 @@ def migrate_mechoice_data(db_name: str = "mechoice", page_size: int = 1000, max_
     except Exception as e:
         logger.error(f"Error in migrate_mechoice_data: {e}", exc_info=True)
     finally:
-        gc.collect()
+        # Removed gc.collect() to prevent debugger hang
+        pass
 
 def drop_collections(db_name: str):
     try:
@@ -258,7 +260,8 @@ def drop_collections(db_name: str):
     except Exception as e:
         logger.error(f"Error dropping collections from MongoDB: {e}", exc_info=True)
     finally:
-        gc.collect()
+        # Removed gc.collect() to prevent debugger hang
+        pass
 
 if __name__ == "__main__":
     # Configuration

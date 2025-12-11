@@ -52,8 +52,8 @@ class MongoDBDataAccess:
         if self.client:
             self.client.close()
             self.client = None
-            logger.info("Closing MongoDB connection")
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
+            logger.info("Closed MongoDB connection")
 
     
     def add_document(self, collection_name: str, document: dict):
@@ -68,7 +68,7 @@ class MongoDBDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
 
     def add_documents(self, collection_name: str, documents: list, max_retries: int = 5, retry_delay: int = 3):
         import time
@@ -132,7 +132,7 @@ class MongoDBDataAccess:
             finally:
                 if attempt < max_retries - 1 or last_error:
                     self.close()
-                gc.collect()
+                # Removed gc.collect() to prevent debugger hang
 
     def drop_collections(self):
         try:
@@ -150,7 +150,7 @@ class MongoDBDataAccess:
             raise e
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang
 
     def _is_ssl_error(self, error):
         error_str = str(error).lower()
@@ -187,4 +187,4 @@ class MongoDBDataAccess:
             return False
         finally:
             self.close()
-            gc.collect()
+            # Removed gc.collect() to prevent debugger hang

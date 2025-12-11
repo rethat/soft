@@ -203,7 +203,7 @@ class MongoDBService:
             raise e
         finally:
             self.mongo_dal.close()
-            gc.collect()
+            
 
     def drop_collections(self):
         try:
@@ -213,7 +213,7 @@ class MongoDBService:
             raise e
         finally:
             self.mongo_dal.close()
-            gc.collect()
+            
 
 
     def process_rms_data(self, bucket_name: str, page: int, data: list):
@@ -330,7 +330,7 @@ class MongoDBService:
             raise e
         finally:
             self.mongo_dal.close()
-            gc.collect()
+            
 
     def _convert_doc_value(self, doc_value):
         """
@@ -360,7 +360,7 @@ class MongoDBService:
                 except (json.JSONDecodeError, ValueError):
                     return None
         elif isinstance(doc_value, int) or isinstance(doc_value, float):
-            return {"Counter": doc_value}
+            return doc_value
         elif isinstance(doc_value, list):
             # Wrap list so restructure flow can derive collection by _type (doc_id)
             # and still access the original list to expand into documents.
@@ -396,7 +396,7 @@ class MongoDBService:
             return set()
         finally:
             self.mongo_dal.close()
-            gc.collect()
+            
 
     def process_mechoice_keep_structure(self, bucket_name: str, data: list, batch_size: int = 500):
         """
@@ -414,7 +414,8 @@ class MongoDBService:
         """
         try:
             collection_name = bucket_name
-            processed_docs = []
+            processed_docs = []  # Regular documents for bucket_name collection
+            counter_docs = []  # Counter documents (only int/float values) for Counter collection
             skipped_count = 0
             skipped_documents = []  # Track skipped documents with reasons
             
@@ -446,6 +447,12 @@ class MongoDBService:
                     
                     # Convert value to dict (or wrapped list) and expand if needed
                     doc_value = self._convert_doc_value(doc_value)
+                    if isinstance(doc_value, int) or isinstance(doc_value, float):
+                        # Create counter document with lowercase "counter" field
+                        counter_doc = {"_id": doc_id, "counter": doc_value, "bucket_name": bucket_name}
+                        counter_docs.append(counter_doc)
+                        continue
+                    
                     if isinstance(doc_value, dict) and isinstance(doc_value.get("items"), list):
                         # List was wrapped -> expand each item to its own document
                         expanded_count = 0
@@ -483,7 +490,7 @@ class MongoDBService:
                         logger.warning(f"[{bucket_name.upper()}]: Document value is not a dict for doc_id: {doc_id}")
                         continue
                     
-                    # Tạo document mới với _id và thêm bucket_name
+                    # All dict documents go to bucket_name collection (regardless of count/counter fields)
                     final_doc = doc_value.copy()
                     final_doc['_id'] = doc_id
                     final_doc['bucket_name'] = bucket_name
@@ -497,40 +504,93 @@ class MongoDBService:
                     logger.error(f"Error processing document with id '{doc_id}' in {bucket_name}: {e}", exc_info=True)
                     continue
             
-            if not processed_docs:
+            total_inserted = 0
+            total_duplicates = 0
+            
+            # Process regular documents for bucket_name collection
+            if processed_docs:
+                # Batch check duplicates
+                doc_ids = [doc['_id'] for doc in processed_docs]
+                existing_ids = self._check_duplicates_batch(collection_name, doc_ids)
+                
+                # Modify duplicate _id by appending bucket_name suffix
+                modified_docs = []
+                duplicate_count = 0
+                for doc in processed_docs:
+                    if doc['_id'] in existing_ids:
+                        # Duplicate found: append bucket_name as suffix
+                        original_id = doc['_id']
+                        doc['_id'] = f"{original_id}:{bucket_name}"
+                        modified_docs.append(doc)
+                        duplicate_count += 1
+                        total_duplicates += 1
+                    else:
+                        # Not a duplicate, keep original _id
+                        modified_docs.append(doc)
+                
+                if duplicate_count > 0:
+                    logger.info(f"[{bucket_name.upper()}]: Found {duplicate_count} duplicate documents in {collection_name}, modified _id with bucket_name suffix")
+                
+                # Insert in batches (all documents, including modified duplicates)
+                if modified_docs:
+                    for i in range(0, len(modified_docs), batch_size):
+                        batch = modified_docs[i:i+batch_size]
+                        try:
+                            self.mongo_dal.add_documents(collection_name, batch, max_retries=5, retry_delay=3)
+                        except Exception as e:
+                            logger.error(f"Error inserting batch into {collection_name}: {e}", exc_info=True)
+                            raise e
+                    
+                    total_inserted += len(modified_docs)
+                    logger.info(f"Successfully inserted {len(modified_docs)} documents into {collection_name}")
+            
+            # Process counter documents (only Counter collection for int/float values)
+            if counter_docs:
+                counter_collection_name = "Counter"
+                # Batch check duplicates
+                counter_doc_ids = [doc['_id'] for doc in counter_docs]
+                existing_counter_ids = self._check_duplicates_batch(counter_collection_name, counter_doc_ids)
+                
+                # Modify duplicate _id by appending bucket_name suffix
+                modified_counter_docs = []
+                counter_duplicate_count = 0
+                for doc in counter_docs:
+                    if doc['_id'] in existing_counter_ids:
+                        # Duplicate found: append bucket_name as suffix
+                        original_id = doc['_id']
+                        doc['_id'] = f"{original_id}:{bucket_name}"
+                        modified_counter_docs.append(doc)
+                        counter_duplicate_count += 1
+                        total_duplicates += 1
+                    else:
+                        # Not a duplicate, keep original _id
+                        modified_counter_docs.append(doc)
+                
+                if counter_duplicate_count > 0:
+                    logger.info(f"Found {counter_duplicate_count} duplicate documents in {counter_collection_name}, modified _id with bucket_name suffix")
+                
+                # Insert in batches (all documents, including modified duplicates)
+                if modified_counter_docs:
+                    for i in range(0, len(modified_counter_docs), batch_size):
+                        batch = modified_counter_docs[i:i+batch_size]
+                        try:
+                            self.mongo_dal.add_documents(counter_collection_name, batch, max_retries=5, retry_delay=3)
+                        except Exception as e:
+                            logger.error(f"Error inserting batch into {counter_collection_name}: {e}", exc_info=True)
+                            raise e
+                    
+                    total_inserted += len(modified_counter_docs)
+                    logger.info(f"Successfully inserted {len(modified_counter_docs)} documents into {counter_collection_name}")
+            
+            if total_inserted == 0:
                 logger.warning(f"No valid documents to insert for {bucket_name}")
                 if skipped_documents:
                     logger.info(f"Skipped documents details for {bucket_name}:")
                     for skipped in skipped_documents:
                         logger.info(f"  - doc_id: {skipped['doc_id']}, reason: {skipped['reason']}")
-                return
-            
-            # Batch check duplicates
-            doc_ids = [doc['_id'] for doc in processed_docs]
-            existing_ids = self._check_duplicates_batch(collection_name, doc_ids)
-            
-            # Filter out duplicates
-            unique_docs = [doc for doc in processed_docs if doc['_id'] not in existing_ids]
-            duplicate_count = len(processed_docs) - len(unique_docs)
-            duplicate_ids = [doc['_id'] for doc in processed_docs if doc['_id'] in existing_ids]
-            
-            if duplicate_count > 0:
-                logger.info(f"[{bucket_name.upper()}]: Found {duplicate_count} duplicate documents in {collection_name}, skipping")
-                for dup_id in duplicate_ids:
-                    skipped_documents.append({"doc_id": dup_id, "reason": "Duplicate document (already exists in collection)"})
-            
-            # Insert in batches
-            if unique_docs:
-                for i in range(0, len(unique_docs), batch_size):
-                    batch = unique_docs[i:i+batch_size]
-                    try:
-                        self.mongo_dal.add_documents(collection_name, batch, max_retries=5, retry_delay=3)
-                        # logger.debug(f"Inserted batch {i//batch_size + 1} ({len(batch)} documents) into {collection_name}")
-                    except Exception as e:
-                        logger.error(f"Error inserting batch into {collection_name}: {e}", exc_info=True)
-                        raise e
+            else:
                 if skipped_count > 0:
-                    logger.info(f"Successfully processed {len(unique_docs)} documents for {bucket_name} (skipped {skipped_count} documents)")
+                    logger.info(f"Successfully processed {total_inserted} documents for {bucket_name} (skipped {skipped_count} documents, modified {total_duplicates} duplicate _ids)")
                 if skipped_documents:
                     logger.info(f"Skipped documents details for {bucket_name}:")
                     # Group by reason for better readability
@@ -545,15 +605,13 @@ class MongoDBService:
                         logger.info(f"  - Reason: {reason}")
                         logger.info(f"    Document IDs ({len(doc_ids_list)}): {', '.join(str(did) for did in doc_ids_list[:10])}" + 
                                   (f" ... and {len(doc_ids_list) - 10} more" if len(doc_ids_list) > 10 else ""))
-            else:
-                logger.warning(f"All documents are duplicates for {bucket_name}")
                 
         except Exception as e:
             logger.error(f"Error processing keep_structure data for {bucket_name}: {e}", exc_info=True)
             raise e
         finally:
             self.mongo_dal.close()
-            gc.collect()
+            
 
     def process_mechoice_restructure(self, bucket_name: str, data: list, batch_size: int = 500):
         """
@@ -668,7 +726,7 @@ class MongoDBService:
             raise e
         finally:
             self.mongo_dal.close()
-            gc.collect()
+            
 
     def process_mechoice_missing_type(self, bucket_name: str, data: list, batch_size: int = 500):
         """
@@ -782,18 +840,28 @@ class MongoDBService:
                 doc_ids = [doc['_id'] for doc in docs]
                 existing_ids = self._check_duplicates_batch(collection_name, doc_ids)
                 
-                # Filter out duplicates
-                unique_docs = [doc for doc in docs if doc['_id'] not in existing_ids]
-                duplicate_count = len(docs) - len(unique_docs)
-                total_duplicates += duplicate_count
+                # Modify duplicate _id by appending bucket_name suffix
+                modified_docs = []
+                duplicate_count = 0
+                for doc in docs:
+                    if doc['_id'] in existing_ids:
+                        # Duplicate found: append bucket_name as suffix
+                        original_id = doc['_id']
+                        doc['_id'] = f"{original_id}:{bucket_name}"
+                        modified_docs.append(doc)
+                        duplicate_count += 1
+                        total_duplicates += 1
+                    else:
+                        # Not a duplicate, keep original _id
+                        modified_docs.append(doc)
                 
                 if duplicate_count > 0:
-                    logger.info(f"Found {duplicate_count} duplicate documents in {collection_name}, skipping")
+                    logger.info(f"Found {duplicate_count} duplicate documents in {collection_name}, modified _id with bucket_name suffix")
                 
-                # Insert in batches
-                if unique_docs:
-                    for i in range(0, len(unique_docs), batch_size):
-                        batch = unique_docs[i:i+batch_size]
+                # Insert in batches (all documents, including modified duplicates)
+                if modified_docs:
+                    for i in range(0, len(modified_docs), batch_size):
+                        batch = modified_docs[i:i+batch_size]
                         try:
                             self.mongo_dal.add_documents(collection_name, batch, max_retries=5, retry_delay=3)
                             logger.debug(f"Inserted batch {i//batch_size + 1} ({len(batch)} documents) into {collection_name}")
@@ -801,20 +869,20 @@ class MongoDBService:
                             logger.error(f"Error inserting batch into {collection_name}: {e}", exc_info=True)
                             raise e
                     
-                    total_inserted += len(unique_docs)
-                    logger.info(f"Successfully inserted {len(unique_docs)} documents into {collection_name}")
+                    total_inserted += len(modified_docs)
+                    logger.info(f"Successfully inserted {len(modified_docs)} documents into {collection_name}")
                 else:
-                    logger.warning(f"All documents are duplicates for {collection_name}")
+                    logger.warning(f"No documents to insert for {collection_name}")
             
             logger.info(f"Successfully processed {total_inserted} documents for {bucket_name} "
-                       f"(skipped {skipped_count + total_duplicates} documents)")
+                       f"(skipped {skipped_count} documents, modified {total_duplicates} duplicate _ids)")
                 
         except Exception as e:
             logger.error(f"Error processing missing_type data for {bucket_name}: {e}", exc_info=True)
             raise e
         finally:
             self.mongo_dal.close()
-            gc.collect()
+            
 
     # def add_document(self, db_name: str, bucket_name: str, document: dict):
     #     try:
