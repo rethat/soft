@@ -242,6 +242,9 @@ class MongoDBService:
                             logger.warning(f"Failed to parse JSON string for collection {bucket_name}: {e2}")
                             return None
                     return processed_doc
+                elif isinstance(value, (int, float)):
+                    # Wrap numeric values so they can be treated as documents
+                    return value
                 elif isinstance(value, dict):
                     return value
                 else:
@@ -257,12 +260,15 @@ class MongoDBService:
                     _document = doc.copy()
                     rms_dict = convert_to_dict(_document.get(bucket_name))
                     
-                    # Skip if rms_dict is None or not a dict
+                    # Normalize non-dict values (e.g., numeric counters) so they can be ingested
                     if not isinstance(rms_dict, dict):
-                        skipped_count += 1
-                        doc_id = _document.get('id', 'unknown')
-                        logger.warning(f"Skipping document with id '{doc_id}' in {bucket_name}: could not convert to dict")
-                        continue
+                        if isinstance(rms_dict, (int, float)):
+                            rms_dict = {"typekey": default_group_key, "value": rms_dict}
+                        else:
+                            skipped_count += 1
+                            doc_id = _document.get('id', 'unknown')
+                            logger.warning(f"Skipping document with id '{doc_id}' in {bucket_name}: could not convert to dict")
+                            continue
                     
                     typekey = rms_dict.get('typekey') if isinstance(rms_dict, dict) else None
                     
